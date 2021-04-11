@@ -55,7 +55,29 @@
 #define ZEBRA_ZPL	0x12		/* Zebra ZPL-based printers */
 #define ZEBRA_CPCL	0x13		/* Zebra CPCL-based printers */
 
+#define BEEPRT		0x14		/* Beeprt, Rollo, Munbyn */
+
 #define INTELLITECH_PCL	0x20		/* Intellitech PCL-based printers */
+
+
+/*
+ * Macros...
+ */
+
+#define div_round_up(a,b) (((a) + (b) - 1) / (b))
+
+
+/*
+ * Enumerations...
+ */
+
+enum media_tracking_e			/**** Media tracking types ****/
+{
+  MEDIA_TRACKING_GAP,			/* Track by gap in labels */
+  MEDIA_TRACKING_BLINE,			/* Track by black line */
+  MEDIA_TRACKING_CONTINUOUS,		/* Disable tracking */
+};
+typedef enum media_tracking_e media_tracking_t;
 
 
 /*
@@ -133,6 +155,9 @@ Setup(ppd_file_t *ppd)			/* I - PPD file */
         break;
 
     case ZEBRA_CPCL :
+        break;
+
+    case BEEPRT :
         break;
 
     case INTELLITECH_PCL :
@@ -306,6 +331,114 @@ StartPage(ppd_file_t         *ppd,	/* I - PPD file */
 	       header->NumCopies);
 	printf("PAGE-WIDTH %u\r\n", header->cupsWidth);
 	printf("PAGE-HEIGHT %u\r\n", header->cupsWidth);
+        break;
+
+    case BEEPRT :
+        {
+	  unsigned dots_per_mm_x, dots_per_mm_y;
+	  unsigned width_mm, height_mm;
+	  int reference_x = 0;
+	  int reference_y = 0;
+	  int rotate = 0;
+	  media_tracking_t media_tracking = MEDIA_TRACKING_GAP;
+	  int gap_mark_height = 3;
+	  int gap_mark_offset = 0;
+	  int feed_offset = 0;
+	  int darkness = 8;
+	  int speed = 4;
+	  int autodotted = 0;
+
+	  /*
+	   * Threat 203 dpi as exactly 8 dots per mm, 300 dpi as 12 dots per mm.
+	   */
+	  dots_per_mm_x = div_round_up(10 * header->HWResolution[0], 254);
+	  dots_per_mm_y = div_round_up(10 * header->HWResolution[1], 254);
+
+	  width_mm = div_round_up(header->cupsWidth, dots_per_mm_x);
+	  height_mm = div_round_up(header->cupsHeight, dots_per_mm_y);
+	  printf("SIZE %u mm,%u mm\r\n", width_mm, height_mm);
+
+	  /* The typo is used in the PPD, but not in user visible strings */
+	  if ((choice = ppdFindMarkedChoice(ppd, "AdjustHoriaontal")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    reference_x = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "AdjustVertical")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    reference_y = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "Rotate")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    rotate = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "zeMediaTracking")) != NULL) {
+	    if (!strcmp(choice->choice, "BLine"))
+	      media_tracking = MEDIA_TRACKING_BLINE;
+	    else if (!strcmp(choice->choice, "Continuous"))
+	      media_tracking = MEDIA_TRACKING_CONTINUOUS;
+	  }
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "GapOrMarkHeight")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    gap_mark_height = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "GapOrMarkOffset")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    gap_mark_offset = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "FeedOffset")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    feed_offset = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "Darkness")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    darkness = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "zePrintRate")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    speed = atoi(choice->choice);
+
+	  if ((choice = ppdFindMarkedChoice(ppd, "Autodotted")) != NULL &&
+	      strcmp(choice->choice, "Default"))
+	    autodotted = atoi(choice->choice);
+
+	  printf("REFERENCE %d,%d\r\n", (int)dots_per_mm_x * reference_x,
+	         (int)dots_per_mm_y * reference_y);
+	  printf("DIRECTION %u,0\r\n", rotate);
+
+	  switch (media_tracking)
+	  {
+	    case MEDIA_TRACKING_GAP:
+	        printf("GAP %d mm,%d mm\r\n",
+	               gap_mark_height, gap_mark_offset);
+	        break;
+
+	    case MEDIA_TRACKING_BLINE:
+	        printf("BLINE %d mm,%d mm\r\n",
+	               gap_mark_height, gap_mark_offset);
+	        break;
+
+	    case MEDIA_TRACKING_CONTINUOUS:
+	        printf("GAP 0 mm,0 mm\r\n");
+	        break;
+	  }
+
+	  printf("OFFSET %d mm\r\n", feed_offset);
+	  printf("DENSITY %u\r\n", darkness);
+	  printf("SPEED %u\r\n", speed);
+
+	  if (autodotted)
+	    printf("SETC AUTODOTTED ON\r\n");
+	  else
+	    printf("SETC AUTODOTTED OFF\r\n");
+
+	  printf("SETC PAUSEKEY ON\r\n");
+	  printf("SETC WATERMARK OFF\r\n");
+	  printf("CLS\r\n");
+
+	  printf("BITMAP 0,0,%u,%u,1,", (header->cupsWidth + 7) >> 3,
+	         header->cupsHeight);
+	}
         break;
 
     case INTELLITECH_PCL :
@@ -682,6 +815,10 @@ EndPage(ppd_file_t          *ppd,	/* I - PPD file */
 	puts("PRINT\r");
 	break;
 
+    case BEEPRT :
+        puts("\nPRINT 1,1\r");
+        break;
+
     case INTELLITECH_PCL :
         printf("\033*rB");		/* End GFX */
         printf("\014");			/* Eject current page */
@@ -876,6 +1013,21 @@ OutputLine(ppd_file_t         *ppd,	/* I - PPD file */
 	  fflush(stdout);
 	}
 	break;
+
+    case BEEPRT :
+        /* Convert 8-bit grayscale to 1-bit black and white */
+        for (i = 0; i < header->cupsBytesPerLine;) {
+          unsigned char out = 0;
+          unsigned char mask = 0x80;
+
+          for (; mask != 0 && i < header->cupsBytesPerLine; mask >>= 1) {
+            if (Buffer[i ++] <= 200)  /* arbitrary threshold */
+              out |= mask;
+          }
+          putchar(~out);
+        }
+        fflush(stdout);
+        break;
 
     case INTELLITECH_PCL :
 	if (Buffer[0] ||
