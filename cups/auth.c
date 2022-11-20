@@ -1,13 +1,15 @@
 /*
  * Authentication functions for CUPS.
  *
- * Copyright 2007-2019 by Apple Inc.
- * Copyright 1997-2007 by Easy Software Products.
+ * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2007-2019 by Apple Inc.
+ * Copyright © 1997-2007 by Easy Software Products.
  *
  * This file contains Kerberos support code, copyright 2006 by
  * Jelmer Vernooij.
  *
- * Licensed under Apache License v2.0.  See the file "LICENSE" for more information.
+ * Licensed under Apache License v2.0.  See the file "LICENSE" for more
+ * information.
  */
 
 /*
@@ -115,7 +117,7 @@ cupsDoAuthentication(
   char		scheme[256],		/* Scheme name */
 		prompt[1024];		/* Prompt for user */
   int		localauth;		/* Local authentication result */
-  _cups_globals_t *cg;			/* Global data */
+  _cups_globals_t *cg = _cupsGlobals();	/* Global data */
 
 
   DEBUG_printf(("cupsDoAuthentication(http=%p, method=\"%s\", resource=\"%s\")", (void *)http, method, resource));
@@ -202,9 +204,38 @@ cupsDoAuthentication(
     }
     else
 #endif /* HAVE_GSSAPI */
-    if (_cups_strcasecmp(scheme, "Basic") &&
-	_cups_strcasecmp(scheme, "Digest") &&
-	_cups_strcasecmp(scheme, "Negotiate"))
+    if (!_cups_strcasecmp(scheme, "Bearer"))
+    {
+      // OAuth 2.0 (Bearer) authentication...
+      const char	*bearer = NULL;	/* Bearer token string, if any */
+
+      if (cg->oauth_cb)
+      {
+        // Try callback...
+	char	scope[HTTP_MAX_VALUE];	/* scope="xyz" string */
+
+	cups_auth_param(schemedata, "realm", http->realm, sizeof(http->realm));
+
+	if (cups_auth_param(schemedata, "scope", scope, sizeof(scope)))
+	  bearer = (cg->oauth_cb)(http, http->realm, scope, resource, cg->oauth_data);
+	else
+	  bearer = (cg->oauth_cb)(http, http->realm, NULL, resource, cg->oauth_data);
+      }
+
+      if (bearer)
+      {
+        // Use this access token...
+        httpSetAuthString(http, "Bearer", bearer);
+        break;
+      }
+      else
+      {
+        // No access token, try the next scheme...
+        DEBUG_puts("2cupsDoAuthentication: No OAuth access token to provide.");
+        continue;
+      }
+    }
+    else if (_cups_strcasecmp(scheme, "Basic") && _cups_strcasecmp(scheme, "Digest") && _cups_strcasecmp(scheme, "Negotiate"))
     {
      /*
       * Other schemes not yet supported...
@@ -226,8 +257,6 @@ cupsDoAuthentication(
 
       char default_username[HTTP_MAX_VALUE];
 					/* Default username */
-
-      cg = _cupsGlobals();
 
       if (!cg->lang_default)
 	cg->lang_default = cupsLangDefault();
@@ -329,10 +358,6 @@ _cupsSetNegotiateAuthString(
 		major_status;		/* Major status code */
   gss_buffer_desc output_token = GSS_C_EMPTY_BUFFER;
 					/* Output token */
-
-
-  (void)method;
-  (void)resource;
 
 #  ifdef __APPLE__
  /*
@@ -450,6 +475,9 @@ _cupsSetNegotiateAuthString(
       }
     }
   }
+#  else
+  (void)method;
+  (void)resource;
 #  endif /* HAVE_GSS_ACQUIRED_CRED_EX_F */
 
   if (major_status == GSS_S_NO_CRED)
@@ -732,9 +760,10 @@ cups_auth_scheme(const char *www_authenticate,	/* I - Pointer into WWW-Authentic
         * Skip quoted value...
         */
 
-        www_authenticate ++;
-        while (*www_authenticate && *www_authenticate != '\"')
+
+        do
           www_authenticate ++;
+        while (*www_authenticate && *www_authenticate != '\"');
       }
     }
 
@@ -1058,12 +1087,14 @@ cups_local_auth(http_t *http)		/* I - HTTP connection to server */
     * Verify that the current cupsUser() matches the current UID...
     */
 
-    struct passwd	*pwd;		/* Password information */
+    struct passwd	pwd;		/* Password information */
+    struct passwd	*result;	/* Auxiliary pointer */
     const char		*username;	/* Current username */
 
     username = cupsUser();
 
-    if ((pwd = getpwnam(username)) != NULL && pwd->pw_uid == getuid())
+    getpwnam_r(username, &pwd, cg->pw_buf, PW_BUF_SIZE, &result);
+    if (result && pwd.pw_uid == getuid())
     {
       httpSetAuthString(http, "PeerCred", username);
 

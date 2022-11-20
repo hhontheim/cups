@@ -1,7 +1,7 @@
 /*
  * Global variable access routines for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2019 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -14,6 +14,7 @@
  */
 
 #include "cups-private.h"
+#include "debug-internal.h"
 #ifndef _WIN32
 #  include <pwd.h>
 #endif /* !_WIN32 */
@@ -184,7 +185,8 @@ cups_globals_alloc(void)
 #ifdef _WIN32
   HKEY		key;			/* Registry key */
   DWORD		size;			/* Size of string */
-  static char	installdir[1024] = "",	/* Install directory */
+  static char	homedir[1024] = "",	/* Home directory */
+		installdir[1024] = "",	/* Install directory */
 		confdir[1024] = "",	/* Server root directory */
 		localedir[1024] = "";	/* Locale directory */
 #endif /* _WIN32 */
@@ -274,7 +276,29 @@ cups_globals_alloc(void)
   if ((cg->localedir = getenv("LOCALEDIR")) == NULL)
     cg->localedir = localedir;
 
-  cg->home = getenv("HOME");
+  if (!homedir[0])
+  {
+    const char	*userprofile = getenv("USERPROFILE");
+				// User profile (home) directory
+    char	*homeptr;	// Pointer into homedir
+
+    DEBUG_printf(("cups_globals_alloc: USERPROFILE=\"%s\"", userprofile));
+
+    if (!strncmp(userprofile, "C:\\", 3))
+      userprofile += 2;
+
+    strlcpy(homedir, userprofile, sizeof(homedir));
+    for (homeptr = homedir; *homeptr; homeptr ++)
+    {
+      // Convert back slashes to forward slashes
+      if (*homeptr == '\\')
+        *homeptr = '/';
+    }
+
+    DEBUG_printf(("cups_globals_alloc: homedir=\"%s\"", homedir));
+  }
+
+  cg->home = homedir;
 
 #else
 #  ifdef HAVE_GETEUID
@@ -325,10 +349,12 @@ cups_globals_alloc(void)
 
   if (!cg->home)
   {
-    struct passwd	*pw;		/* User info */
+    struct passwd	pw;		/* User info */
+    struct passwd	*result;	/* Auxiliary pointer */
 
-    if ((pw = getpwuid(getuid())) != NULL)
-      cg->home = _cupsStrAlloc(pw->pw_dir);
+    getpwuid_r(getuid(), &pw, cg->pw_buf, PW_BUF_SIZE, &result);
+    if (result)
+      cg->home = _cupsStrAlloc(pw.pw_dir);
   }
 #endif /* _WIN32 */
 

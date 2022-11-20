@@ -1,6 +1,6 @@
 *.a
 *.bck
-*.cgi
+/cgi-bin/*.cgi
 *.o
 /autom4te.cache
 /config.h
@@ -123,6 +123,7 @@
 /scheduler/testmime
 /scheduler/testspeed
 /scheduler/testsub
+/scratch
 /systemv/cancel
 /systemv/cupsaccept
 /systemv/cupsaddsmb

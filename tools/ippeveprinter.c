@@ -1,7 +1,7 @@
 /*
  * IPP Everywhere printer application for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2020 by the IEEE-ISTO Printer Working Group.
  * Copyright © 2010-2021 by Apple Inc.
  *
@@ -27,10 +27,10 @@
 #endif /* !CUPS_LITE */
 
 #include <limits.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 
 #ifdef _WIN32
-#  include <fcntl.h>
 #  include <io.h>
 #  include <process.h>
 #  define WEXITSTATUS(s) (s)
@@ -41,10 +41,13 @@ typedef ULONG nfds_t;
 extern char **environ;
 
 #  include <spawn.h>
-#  include <sys/fcntl.h>
 #  include <sys/wait.h>
 #  include <poll.h>
 #endif /* _WIN32 */
+
+#ifndef O_BINARY
+#  define O_BINARY 0			/* Windows "binary file" nonsense */
+#endif /* !O_BINARY */
 
 #ifdef HAVE_MDNSRESPONDER
 #  include <dns_sd.h>
@@ -338,6 +341,9 @@ static void		run_printer(ippeve_printer_t *printer);
 static int		show_media(ippeve_client_t *client);
 static int		show_status(ippeve_client_t *client);
 static int		show_supplies(ippeve_client_t *client);
+#ifndef _WIN32
+static void		signal_handler(int signum);
+#endif // !_WIN32
 static char		*time_string(time_t tv, char *buffer, size_t bufsize);
 static void		usage(int status) _CUPS_NORETURN;
 static int		valid_doc_attributes(ippeve_client_t *client);
@@ -360,6 +366,9 @@ static int		KeepFiles = 0,	/* Keep spooled job files? */
 			Verbosity = 0;	/* Verbosity level */
 static const char	*PAMService = NULL;
 					/* PAM service */
+#ifndef _WIN32
+static int		StopPrinter = 0;/* Stop the printer server? */
+#endif // !_WIN32
 
 
 /*
@@ -393,7 +402,7 @@ main(int  argc,				/* I - Number of command-line args */
 		duplex = 0,		/* Duplex mode */
 		ppm = 10,		/* Pages per minute for mono */
 		ppm_color = 0,		/* Pages per minute for color */
-		web_forms = 1;		/* Enable web site forms? */
+		web_forms = 1;		/* Enable website forms? */
   ipp_t		*attrs = NULL;		/* Printer attributes */
   char		directory[1024] = "";	/* Spool directory */
   cups_array_t	*docformats = NULL;	/* Supported formats */
@@ -1137,6 +1146,7 @@ create_job(ippeve_client_t *client)	/* I - Client */
   if ((job = calloc(1, sizeof(ippeve_job_t))) == NULL)
   {
     perror("Unable to allocate memory for job");
+    _cupsRWUnlock(&(client->printer->rwlock));
     return (NULL);
   }
 
@@ -1289,7 +1299,7 @@ create_job_file(
 
   snprintf(fname, fnamesize, "%s/%d-%s.%s", directory, job->id, name, ext);
 
-  return (open(fname, O_WRONLY | O_CREAT | O_TRUNC, 0666));
+  return (open(fname, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666));
 }
 
 
@@ -2622,7 +2632,7 @@ finish_document_uri(
 
   if (!strcmp(scheme, "file"))
   {
-    if ((infile = open(resource, O_RDONLY)) < 0)
+    if ((infile = open(resource, O_RDONLY | O_BINARY)) < 0)
     {
       respond_ipp(client, IPP_STATUS_ERROR_DOCUMENT_ACCESS, "Unable to access URI: %s", strerror(errno));
 
@@ -4321,7 +4331,7 @@ load_legacy_attributes(
     "oe_photo-l_3.5x5in",		/* Photo L */
     "na_index-4x6_4x6in",		/* Photo 4x6 */
     "iso_a6_105x148mm",			/* A6 */
-    "na_5x7_5x7in"			/* Photo 5x7 aka 2L */
+    "na_5x7_5x7in",			/* Photo 5x7 aka 2L */
     "iso_a5_148x210mm",			/* A5 */
   };
   static const char * const media_ready[] =
@@ -5844,7 +5854,7 @@ process_client(ippeve_client_t *client)	/* I - Client */
   }
 
  /*
-  * Close the conection to the client and return...
+  * Close the connection to the client and return...
   */
 
   delete_client(client);
@@ -6012,7 +6022,8 @@ process_http(ippeve_client_t *client)	/* I - Client connection */
     client->host_port = client->printer->port;
   }
 
-  ptr = strrchr(client->host_field, '.');
+  if ((ptr = strstr(client->host_field, ".local")) == NULL)
+    ptr = strrchr(client->host_field, '.');
 
   if (!isdigit(client->host_field[0] & 255) && client->host_field[0] != '[' && strcmp(client->host_field, client->printer->hostname) && strcmp(client->host_field, "localhost") &&
       (!ptr || (strcmp(ptr, ".local") && strcmp(ptr, ".local."))))
@@ -6088,7 +6099,7 @@ process_http(ippeve_client_t *client)	/* I - Client connection */
 	    char	buffer[4096];	/* Copy buffer */
 	    ssize_t	bytes;		/* Bytes */
 
-	    if (!stat(client->printer->strings, &fileinfo) && (fd = open(client->printer->strings, O_RDONLY)) >= 0)
+	    if (!stat(client->printer->strings, &fileinfo) && (fd = open(client->printer->strings, O_RDONLY | O_BINARY)) >= 0)
 	    {
 	      if (!respond_http(client, HTTP_STATUS_OK, NULL, "text/strings", (size_t)fileinfo.st_size))
 	      {
@@ -6122,7 +6133,7 @@ process_http(ippeve_client_t *client)	/* I - Client connection */
 	    char	buffer[4096];	/* Copy buffer */
 	    ssize_t	bytes;		/* Bytes */
 
-	    if (!stat(client->printer->icons[1], &fileinfo) && (fd = open(client->printer->icons[1], O_RDONLY)) >= 0)
+	    if (!stat(client->printer->icons[1], &fileinfo) && (fd = open(client->printer->icons[1], O_RDONLY | O_BINARY)) >= 0)
 	    {
 	      if (!respond_http(client, HTTP_STATUS_OK, NULL, "image/png", (size_t)fileinfo.st_size))
 	      {
@@ -6164,7 +6175,7 @@ process_http(ippeve_client_t *client)	/* I - Client connection */
 	    char	buffer[4096];	/* Copy buffer */
 	    ssize_t	bytes;		/* Bytes */
 
-	    if (!stat(client->printer->icons[2], &fileinfo) && (fd = open(client->printer->icons[2], O_RDONLY)) >= 0)
+	    if (!stat(client->printer->icons[2], &fileinfo) && (fd = open(client->printer->icons[2], O_RDONLY | O_BINARY)) >= 0)
 	    {
 	      if (!respond_http(client, HTTP_STATUS_OK, NULL, "image/png", (size_t)fileinfo.st_size))
 	      {
@@ -6206,7 +6217,7 @@ process_http(ippeve_client_t *client)	/* I - Client connection */
 	    char	buffer[4096];	/* Copy buffer */
 	    ssize_t	bytes;		/* Bytes */
 
-	    if (!stat(client->printer->icons[0], &fileinfo) && (fd = open(client->printer->icons[0], O_RDONLY)) >= 0)
+	    if (!stat(client->printer->icons[0], &fileinfo) && (fd = open(client->printer->icons[0], O_RDONLY | O_BINARY)) >= 0)
 	    {
 	      if (!respond_http(client, HTTP_STATUS_OK, NULL, "image/png", (size_t)fileinfo.st_size))
 	      {
@@ -6800,7 +6811,7 @@ process_job(ippeve_job_t *job)		/* I - Job */
         {
           if (errno == ENOENT)
           {
-            if ((mystdout = open(resource, O_WRONLY | O_CREAT | O_TRUNC, 0666)) >= 0)
+            if ((mystdout = open(resource, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666)) >= 0)
 	      fprintf(stderr, "[Job %d] Saving print command output to \"%s\".\n", job->id, resource);
 	    else
 	      fprintf(stderr, "[Job %d] Unable to create \"%s\": %s\n", job->id, resource, strerror(errno));
@@ -6817,12 +6828,12 @@ process_job(ippeve_job_t *job)		/* I - Job */
         }
 	else if (!S_ISREG(fileinfo.st_mode))
 	{
-	  if ((mystdout = open(resource, O_WRONLY | O_CREAT | O_TRUNC, 0666)) >= 0)
+	  if ((mystdout = open(resource, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0666)) >= 0)
 	    fprintf(stderr, "[Job %d] Saving print command output to \"%s\".\n", job->id, resource);
 	  else
             fprintf(stderr, "[Job %d] Unable to create \"%s\": %s\n", job->id, resource, strerror(errno));
 	}
-        else if ((mystdout = open(resource, O_WRONLY)) >= 0)
+        else if ((mystdout = open(resource, O_WRONLY | O_BINARY)) >= 0)
 	  fprintf(stderr, "[Job %d] Saving print command output to \"%s\".\n", job->id, resource);
 	else
 	  fprintf(stderr, "[Job %d] Unable to open \"%s\": %s\n", job->id, resource, strerror(errno));
@@ -6852,7 +6863,7 @@ process_job(ippeve_job_t *job)		/* I - Job */
     }
 
     if (mystdout < 0)
-      mystdout = open("/dev/null", O_WRONLY);
+      mystdout = open("/dev/null", O_WRONLY | O_BINARY);
 
     if (pipe(mypipe))
     {
@@ -7019,8 +7030,6 @@ process_job(ippeve_job_t *job)		/* I - Job */
 #endif /* !_WIN32 */
       job->state = IPP_JSTATE_ABORTED;
     }
-    else if (status < 0)
-      job->state = IPP_JSTATE_ABORTED;
     else
       fprintf(stderr, "[Job %d] Command \"%s\" completed successfully.\n", job->id, job->printer->command);
 
@@ -7613,7 +7622,7 @@ respond_ipp(ippeve_client_t *client,	/* I - Client */
 static void
 respond_unsupported(
     ippeve_client_t   *client,		/* I - Client */
-    ipp_attribute_t *attr)		/* I - Atribute */
+    ipp_attribute_t *attr)		/* I - Attribute */
 {
   ipp_attribute_t	*temp;		/* Copy of attribute */
 
@@ -7636,6 +7645,15 @@ run_printer(ippeve_printer_t *printer)	/* I - Printer */
   struct pollfd		polldata[3];	/* poll() data */
   ippeve_client_t	*client;	/* New client */
 
+
+#ifndef _WIN32
+ /*
+  * Set signal handlers for SIGINT and SIGTERM...
+  */
+
+  signal(SIGINT, signal_handler);
+  signal(SIGTERM, signal_handler);
+#endif // !_WIN32
 
  /*
   * Setup poll() data for the DNS-SD service socket and IPv4/6 listeners...
@@ -7665,6 +7683,11 @@ run_printer(ippeve_printer_t *printer)	/* I - Printer */
       perror("poll() failed");
       break;
     }
+
+#ifndef _WIN32
+    if (StopPrinter)
+      break;
+#endif // !_WIN32
 
     if (polldata[0].revents & POLLIN)
     {
@@ -8043,6 +8066,8 @@ show_media(ippeve_client_t  *client)	/* I - Client connection */
   else
     html_printf(client, "</table>\n");
 
+  cupsFreeOptions(num_options, options);
+
   html_footer(client);
 
   return (1);
@@ -8327,10 +8352,27 @@ show_supplies(
   else
     html_printf(client, "</table>\n");
 
+  cupsFreeOptions(num_options, options);
+
   html_footer(client);
 
   return (1);
 }
+
+
+#ifndef _WIN32
+/*
+ * 'signal_handler()' - Handle termination signals.
+ */
+
+static void
+signal_handler(int signum)		/* I - Signal number (not used) */
+{
+  (void)signum;
+
+  StopPrinter = 1;
+}
+#endif // !_WIN32
 
 
 /*

@@ -1,7 +1,8 @@
 /*
  * TLS support code for CUPS on macOS.
  *
- * Copyright © 2007-2019 by Apple Inc.
+ * Copyright © 2021-2022 by OpenPrinting
+ * Copyright © 2007-2021 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
  * Licensed under Apache License v2.0.  See the file "LICENSE" for more
@@ -252,7 +253,7 @@ cupsMakeServerCredentials(
   CFNumberRef	usage = CFNumberCreate(kCFAllocatorDefault, kCFNumberCFIndexType, &usageInt);
   CFIndex	lenInt = 0;
   CFNumberRef	len = CFNumberCreate(kCFAllocatorDefault, kCFNumberCFIndexType, &lenInt);
-  CFTypeRef certKeys[] = { kSecCSRBasicContraintsPathLen, kSecSubjectAltName, kSecCertificateKeyUsage };
+  CFTypeRef certKeys[] = { kSecCSRBasicConstraintsPathLen, kSecSubjectAltName, kSecCertificateKeyUsage };
   CFTypeRef certValues[] = { len, cfcommon_name, usage };
   CFDictionaryRef certParams = CFDictionaryCreate(kCFAllocatorDefault, certKeys, certValues, sizeof(certKeys) / sizeof(certKeys[0]), &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
   CFRelease(usage);
@@ -291,7 +292,7 @@ cupsMakeServerCredentials(
     else
       tls_selfsigned = ident;
 
-    _cupsMutexLock(&tls_mutex);
+    _cupsMutexUnlock(&tls_mutex);
 
 #  if 0 /* Someday perhaps SecItemCopyMatching will work for identities, at which point  */
     CFTypeRef itemKeys[] = { kSecClass, kSecAttrLabel, kSecValueRef };
@@ -1157,8 +1158,7 @@ _httpTLSRead(http_t *http,		/* I - HTTP connection */
 
 
   error = SSLRead(http->tls, buf, (size_t)len, &processed);
-  DEBUG_printf(("6_httpTLSRead: error=%d, processed=%d", (int)error,
-                (int)processed));
+  DEBUG_printf(("5_httpTLSRead: error=%d, processed=%d", (int)error, (int)processed));
   switch (error)
   {
     case 0 :
@@ -1473,14 +1473,12 @@ _httpTLSStart(http_t *http)		/* I - HTTP connection */
     {
       error = SSLSetSessionOption(http->tls,
 				  kSSLSessionOptionBreakOnCertRequested, true);
-      DEBUG_printf(("4_httpTLSStart: kSSLSessionOptionBreakOnCertRequested, "
-                    "error=%d", (int)error));
+      DEBUG_printf(("4_httpTLSStart: kSSLSessionOptionBreakOnCertRequested, error=%d", (int)error));
     }
     else
     {
       error = http_cdsa_set_credentials(http);
-      DEBUG_printf(("4_httpTLSStart: http_cdsa_set_credentials, error=%d",
-                    (int)error));
+      DEBUG_printf(("4_httpTLSStart: http_cdsa_set_credentials, error=%d", (int)error));
     }
   }
   else if (!error)
@@ -1524,6 +1522,8 @@ _httpTLSStart(http_t *http)		/* I - HTTP connection */
     if (isdigit(hostname[0] & 255) || hostname[0] == '[')
       hostname[0] = '\0';		/* Don't allow numeric addresses */
 
+    _cupsMutexLock(&tls_mutex);
+
     if (hostname[0])
       http->tls_credentials = http_cdsa_copy_server(hostname);
     else if (tls_common_name)
@@ -1539,12 +1539,15 @@ _httpTLSStart(http_t *http)		/* I - HTTP connection */
 	http->error  = errno = EINVAL;
 	http->status = HTTP_STATUS_ERROR;
 	_cupsSetError(IPP_STATUS_ERROR_INTERNAL, _("Unable to create server credentials."), 1);
+	_cupsMutexUnlock(&tls_mutex);
 
 	return (-1);
       }
 
       http->tls_credentials = http_cdsa_copy_server(hostname[0] ? hostname : tls_common_name);
     }
+
+    _cupsMutexUnlock(&tls_mutex);
 
     if (!http->tls_credentials)
     {
@@ -1649,8 +1652,7 @@ _httpTLSStart(http_t *http)		/* I - HTTP connection */
 		httpFreeCredentials(credentials);
 	      }
 
-	      DEBUG_printf(("4_httpTLSStart: Server certificate callback "
-	                    "returned %d.", (int)error));
+	      DEBUG_printf(("4_httpTLSStart: Server certificate callback returned %d.", (int)error));
 	    }
 	    break;
 
@@ -1692,8 +1694,7 @@ _httpTLSStart(http_t *http)		/* I - HTTP connection */
 		error = (cg->client_cert_cb)(http, http->tls, names,
 					     cg->client_cert_data);
 
-		DEBUG_printf(("4_httpTLSStart: Client certificate callback "
-		              "returned %d.", (int)error));
+		DEBUG_printf(("4_httpTLSStart: Client certificate callback returned %d.", (int)error));
 	      }
 
 	      httpFreeCredentials(names);
@@ -1701,38 +1702,31 @@ _httpTLSStart(http_t *http)		/* I - HTTP connection */
 	    break;
 
 	case errSSLUnknownRootCert :
-	    message = _("Unable to establish a secure connection to host "
-	                "(untrusted certificate).");
+	    message = _("Unable to establish a secure connection to host (untrusted certificate).");
 	    break;
 
 	case errSSLNoRootCert :
-	    message = _("Unable to establish a secure connection to host "
-	                "(self-signed certificate).");
+	    message = _("Unable to establish a secure connection to host (self-signed certificate).");
 	    break;
 
 	case errSSLCertExpired :
-	    message = _("Unable to establish a secure connection to host "
-	                "(expired certificate).");
+	    message = _("Unable to establish a secure connection to host (expired certificate).");
 	    break;
 
 	case errSSLCertNotYetValid :
-	    message = _("Unable to establish a secure connection to host "
-	                "(certificate not yet valid).");
+	    message = _("Unable to establish a secure connection to host (certificate not yet valid).");
 	    break;
 
 	case errSSLHostNameMismatch :
-	    message = _("Unable to establish a secure connection to host "
-	                "(host name mismatch).");
+	    message = _("Unable to establish a secure connection to host (host name mismatch).");
 	    break;
 
 	case errSSLXCertChainInvalid :
-	    message = _("Unable to establish a secure connection to host "
-	                "(certificate chain invalid).");
+	    message = _("Unable to establish a secure connection to host (certificate chain invalid).");
 	    break;
 
 	case errSSLConnectionRefused :
-	    message = _("Unable to establish a secure connection to host "
-	                "(peer dropped connection before responding).");
+	    message = _("Unable to establish a secure connection to host (peer dropped connection before responding).");
 	    break;
 
  	default :
@@ -1812,7 +1806,7 @@ _httpTLSWrite(http_t     *http,		/* I - HTTP connection */
   size_t	processed;		/* Number of bytes processed */
 
 
-  DEBUG_printf(("2_httpTLSWrite(http=%p, buf=%p, len=%d)", (void *)http, (void *)buf, len));
+  DEBUG_printf(("4_httpTLSWrite(http=%p, buf=%p, len=%d)", (void *)http, (void *)buf, len));
 
   error = SSLWrite(http->tls, buf, (size_t)len, &processed);
 
@@ -1848,7 +1842,7 @@ _httpTLSWrite(http_t     *http,		/* I - HTTP connection */
 	break;
   }
 
-  DEBUG_printf(("3_httpTLSWrite: Returning %d.", (int)result));
+  DEBUG_printf(("5_httpTLSWrite: Returning %d.", (int)result));
 
   return ((int)result);
 }

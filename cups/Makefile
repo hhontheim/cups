@@ -1,7 +1,7 @@
 #
 # Library Makefile for CUPS.
 #
-# Copyright © 2021 by OpenPrinting.
+# Copyright © 2021-2022 by OpenPrinting.
 # Copyright © 2007-2021 by Apple Inc.
 # Copyright © 1997-2006 by Easy Software Products, all rights reserved.
 #
@@ -174,7 +174,6 @@ LIBTARGETS =	\
 		libcupsimage.a
 
 UNITTARGETS =	\
-		fuzzipp \
 		rasterbench \
 		testadmin \
 		testarray \
@@ -228,7 +227,7 @@ unittests:	$(UNITTARGETS)
 #
 
 clean:
-	$(RM) $(OBJS) $(TARGETS) $(UNITTARGETS)
+	$(RM) $(OBJS) $(TARGETS) $(UNITTARGETS) fuzzipp
 	$(RM) libcups.so libcups.dylib
 	$(RM) libcupsimage.so libcupsimage.dylib
 
@@ -775,4 +774,4 @@ sloc:
 #
 
 include Dependencies
-tls.o: tls-darwin.c tls-gnutls.c tls-sspi.c
+tls.o: tls-darwin.c tls-gnutls.c tls-openssl.c tls-sspi.c

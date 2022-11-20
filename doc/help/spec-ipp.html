@@ -1292,7 +1292,7 @@ CUPS-Get-PPDs Response:
 
 	<dt>"document-number" (integer(1:MAX)):
 
-	<dd>The client MUST supply a document number to retrieve. The <tt>document-count</tt> attribute for the job defines the maximum document number that can be specified. In the case of jobs with banners (<tt>job-sheets</tt> is not "none"), document number 1 will typically contain the start banner and document number N will typically contain the end banner.
+	<dd>The client MUST supply a document number to retrieve. The <tt>number-of-documents</tt> attribute for the job defines the maximum document number that can be specified. In the case of jobs with banners (<tt>job-sheets</tt> is not "none"), document number 1 will typically contain the start banner and document number N will typically contain the end banner.
 
 </dl>
 
@@ -1497,7 +1497,7 @@ CUPS-Get-PPDs Response:
 
 <h4><a name="auth-info">auth-info (1setOf text(MAX))</a><span class="info">CUPS 1.3/macOS 10.5</span></h4>
 
-<p>The "auth-info" attribute specifies the authentication information to use when printing to a remote device. The order and content of each text value is specifed by the <a href="#auth-info-required">auth-info-required</a> printer attribute.
+<p>The "auth-info" attribute specifies the authentication information to use when printing to a remote device. The order and content of each text value is specified by the <a href="#auth-info-required">auth-info-required</a> printer attribute.
 
 <h4><a name="job-cancel-after">job-cancel-after (integer(1:MAX))</a><span class='info'>CUPS 2.0</span></h4>
 

@@ -1,7 +1,7 @@
 /*
  * DNS-SD discovery backend for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2008-2018 by Apple Inc.
  *
  * Licensed under Apache License v2.0.  See the file "LICENSE" for more
@@ -887,7 +887,12 @@ get_device(cups_array_t *devices,	/* I - Device array */
   * Yes, add the device...
   */
 
-  device           = calloc(sizeof(cups_device_t), 1);
+  if ((device = calloc(sizeof(cups_device_t), 1)) == NULL)
+  {
+    perror("DEBUG: Out of memory adding a device");
+    return (NULL);
+  }
+
   device->name     = strdup(serviceName);
   device->domain   = strdup(replyDomain);
   device->type     = key.type;

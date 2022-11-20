@@ -1,7 +1,7 @@
 /*
  * cupsGetDevices implementation for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2008-2016 by Apple Inc.
  *
  * Licensed under Apache License v2.0.  See the file "LICENSE" for more
@@ -248,20 +248,14 @@ cupsGetDevices(
   httpBlocking(http, blocking);
   httpFlush(http);
 
-  if (status == HTTP_STATUS_ERROR)
-    _cupsSetError(IPP_STATUS_ERROR_INTERNAL, strerror(http->error), 0);
-  else
-  {
-    attr = ippFindAttribute(response, "status-message", IPP_TAG_TEXT);
+  attr = ippFindAttribute(response, "status-message", IPP_TAG_TEXT);
 
-    DEBUG_printf(("cupsGetDevices: status-code=%s, status-message=\"%s\"",
-		  ippErrorString(response->request.status.status_code),
-		  attr ? attr->values[0].string.text : ""));
+  DEBUG_printf(("cupsGetDevices: status-code=%s, status-message=\"%s\"",
+                ippErrorString(response->request.status.status_code),
+                attr ? attr->values[0].string.text : ""));
 
-    _cupsSetError(response->request.status.status_code,
-		  attr ? attr->values[0].string.text :
-		      ippErrorString(response->request.status.status_code), 0);
-  }
+  _cupsSetError(response->request.status.status_code,
+                attr ? attr->values[0].string.text : ippErrorString(response->request.status.status_code), 0);
 
   ippDelete(response);
 

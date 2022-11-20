@@ -1,7 +1,7 @@
 /*
  * ipptool command for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2020 by The Printer Working Group.
  * Copyright © 2007-2021 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products.
@@ -32,6 +32,15 @@
 
 
 /*
+ * Limits...
+ */
+
+#define MAX_EXPECT	200		// Maximum number of EXPECT directives
+#define MAX_DISPLAY	200		// Maximum number of DISPLAY directives
+#define MAX_MONITOR	10		// Maximum number of MONITOR-PRINTER-STATE EXPECT directives
+
+
+/*
  * Types...
  */
 
@@ -49,7 +58,8 @@ typedef enum ipptool_output_e		/**** Output mode ****/
   IPPTOOL_OUTPUT_PLIST,			/* XML plist test output */
   IPPTOOL_OUTPUT_IPPSERVER,		/* ippserver attribute file output */
   IPPTOOL_OUTPUT_LIST,			/* Tabular list output */
-  IPPTOOL_OUTPUT_CSV			/* Comma-separated values output */
+  IPPTOOL_OUTPUT_CSV,			/* Comma-separated values output */
+  IPPTOOL_OUTPUT_JSON			/* JSON output */
 } ipptool_output_t;
 
 typedef enum ipptool_with_e		/**** WITH flags ****/
@@ -76,7 +86,8 @@ typedef struct ipptool_expect_s		/**** Expected attribute info ****/
 		*with_value_from,	/* Attribute must have one of the values in this attribute */
 		*define_match,		/* Variable to define on match */
 		*define_no_match,	/* Variable to define on no-match */
-		*define_value;		/* Variable to define with value */
+		*define_value,		/* Variable to define with value */
+		*display_match;		/* Message to display on a match */
   int		repeat_limit,		/* Maximum number of times to repeat */
 		repeat_match,		/* Repeat test on match */
 		repeat_no_match,	/* Repeat test on no match */
@@ -136,9 +147,9 @@ typedef struct ipptool_test_s		/**** Test Data ****/
   char		compression[16];	/* COMPRESSION value */
   useconds_t	delay;                  /* Initial delay */
   int		num_displayed;		/* Number of displayed attributes */
-  char		*displayed[200];	/* Displayed attributes */
+  char		*displayed[MAX_DISPLAY];/* Displayed attributes */
   int		num_expects;		/* Number of expected attributes */
-  ipptool_expect_t expects[200],	/* Expected attributes */
+  ipptool_expect_t expects[MAX_EXPECT],	/* Expected attributes */
 		*expect,		/* Current expected attribute */
 		*last_expect;		/* Last EXPECT (for predicates) */
   char		file[1024],		/* Data filename */
@@ -163,7 +174,8 @@ typedef struct ipptool_test_s		/**** Test Data ****/
   useconds_t	monitor_delay,		/* MONITOR-PRINTER-STATE DELAY value, if any */
 		monitor_interval;	/* MONITOR-PRINTER-STATE DELAY interval */
   int		num_monitor_expects;	/* Number MONITOR-PRINTER-STATE EXPECTs */
-  ipptool_expect_t monitor_expects[10];	/* MONITOR-PRINTER-STATE EXPECTs */
+  ipptool_expect_t monitor_expects[MAX_MONITOR];
+					/* MONITOR-PRINTER-STATE EXPECTs */
 } ipptool_test_t;
 
 
@@ -193,11 +205,13 @@ static char	*iso_date(const ipp_uchar_t *date);
 static int	parse_monitor_printer_state(_ipp_file_t *f, ipptool_test_t *data);
 static void	pause_message(const char *message);
 static void	print_attr(cups_file_t *outfile, ipptool_output_t output, ipp_attribute_t *attr, ipp_tag_t *group);
-static void	print_csv(ipptool_test_t *data, ipp_t *ipp, ipp_attribute_t *attr, int num_displayed, char **displayed, size_t *widths);
+static ipp_attribute_t *print_csv(ipptool_test_t *data, ipp_t *ipp, ipp_attribute_t *attr, int num_displayed, char **displayed, size_t *widths);
 static void	print_fatal_error(ipptool_test_t *data, const char *s, ...) _CUPS_FORMAT(2, 3);
 static void	print_ippserver_attr(ipptool_test_t *data, ipp_attribute_t *attr, int indent);
 static void	print_ippserver_string(ipptool_test_t *data, const char *s, size_t len);
-static void	print_line(ipptool_test_t *data, ipp_t *ipp, ipp_attribute_t *attr, int num_displayed, char **displayed, size_t *widths);
+static void	print_json_attr(ipptool_test_t *data, ipp_attribute_t *attr, int indent);
+static void	print_json_string(ipptool_test_t *data, const char *s, size_t len);
+static ipp_attribute_t *print_line(ipptool_test_t *data, ipp_t *ipp, ipp_attribute_t *attr, int num_displayed, char **displayed, size_t *widths);
 static void	print_xml_header(ipptool_test_t *data);
 static void	print_xml_string(cups_file_t *outfile, const char *element, const char *s);
 static void	print_xml_trailer(ipptool_test_t *data, int success, const char *message);
@@ -583,6 +597,10 @@ main(int  argc,				/* I - Number of command-line args */
 	      }
 	      break;
 
+          case 'j' : /* JSON output */
+              data.output = IPPTOOL_OUTPUT_JSON;
+              break;
+
           case 'l' : /* List as a table */
               data.output = IPPTOOL_OUTPUT_LIST;
               break;
@@ -909,7 +927,7 @@ static void *				// O - Thread exit status
 do_monitor_printer_state(
     ipptool_test_t *data)		// I - Test data
 {
-  int		i;			// Looping var
+  int		i, j;			// Looping vars
   char		scheme[32],		// URI scheme
 		userpass[32],		// URI username:password
 		host[256],		// URI hostname/IP address
@@ -923,47 +941,8 @@ do_monitor_printer_state(
   ipp_attribute_t *found;		// Found attribute
   ipptool_expect_t *expect;		// Current EXPECT test
   char		buffer[131072];		// Copy buffer
-  static const char *pattrs[] =		// List of attributes we care about
-  {
-    "marker-change-time",		// "marker-xxx" are a CUPS/AirPrint extension
-    "marker-colors",
-    "marker-high-levels",
-    "marker-levels",
-    "marker-low-levels",
-    "marker-message",
-    "marker-names",
-    "marker-types",
-    "printer-alert",
-    "printer-alert-description",
-    "printer-config-change-date-time",
-    "printer-config-change-time",
-    "printer-config-changes",
-    "printer-current-time",
-    "printer-finisher",
-    "printer-finisher-description",
-    "printer-finisher-supplies",
-    "printer-finisher-supplies-description",
-    "printer-impressions-completed",
-    "printer-impressions-completed-col",
-    "printer-input-tray",
-    "printer-is-accepting-jobs",
-    "printer-media-sheets-completed",
-    "printer-media-sheets-completed-col",
-    "printer-message-date-time",
-    "printer-message-from-operator",
-    "printer-message-time",
-    "printer-output-tray",
-    "printer-pages-completed",
-    "printer-pages-completed-col",
-    "printer-state",
-    "printer-state-change-date-time",
-    "printer-state-change-time",
-    "printer-state-reasons",
-    "printer-supply",
-    "printer-supply-description",
-    "printer-up-time",
-    "queued-job-count"
-  };
+  int		num_pattrs;		// Number of printer attributes
+  const char	*pattrs[100];		// Printer attributes we care about
 
 
   // Connect to the printer...
@@ -999,15 +978,33 @@ do_monitor_printer_state(
 
   // Create a query request that we'll reuse...
   request = ippNewRequest(IPP_OP_GET_PRINTER_ATTRIBUTES);
+  ippSetRequestId(request, data->request_id * 100 - 1);
   ippSetVersion(request, data->version / 10, data->version % 10);
   ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_URI, "printer-uri", NULL, data->monitor_uri);
   ippAddString(request, IPP_TAG_OPERATION, IPP_TAG_NAME, "requesting-user-name", NULL, cupsUser());
-  ippAddStrings(request, IPP_TAG_OPERATION, IPP_CONST_TAG(IPP_TAG_KEYWORD), "requested-attributes", (int)(sizeof(pattrs) / sizeof(pattrs[0])), NULL, pattrs);
+
+  for (i = data->num_monitor_expects, expect = data->monitor_expects, num_pattrs = 0; i > 0; i --, expect ++)
+  {
+    // Add EXPECT attribute names...
+    for (j = 0; j < num_pattrs; j ++)
+    {
+      if (!strcmp(expect->name, pattrs[j]))
+        break;
+    }
+
+    if (j >= num_pattrs && num_pattrs < (int)(sizeof(pattrs) / sizeof(pattrs[0])))
+      pattrs[num_pattrs ++] = expect->name;
+  }
+
+  if (num_pattrs > 0)
+    ippAddStrings(request, IPP_TAG_OPERATION, IPP_CONST_TAG(IPP_TAG_KEYWORD), "requested-attributes", num_pattrs, NULL, pattrs);
 
   // Loop until we need to stop...
   while (!data->monitor_done && !Cancel)
   {
     // Poll the printer state...
+    ippSetRequestId(request, ippGetRequestId(request) + 1);
+
     if ((status = cupsSendRequest(http, request, resource, ippLength(request))) != HTTP_STATUS_ERROR)
     {
       response = cupsGetResponse(http, resource);
@@ -1084,6 +1081,9 @@ do_monitor_printer_state(
 	}
 	break;
       }
+
+      if (found && expect->display_match && (data->output == IPPTOOL_OUTPUT_TEST || (data->output == IPPTOOL_OUTPUT_PLIST && data->outfile != cupsFileStdout())))
+	cupsFilePrintf(cupsFileStdout(), "CONT]\n\n%s\n\n    %-68.68s [", expect->display_match, data->name);
 
       if (found && expect->define_match)
       {
@@ -1183,7 +1183,7 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
   char		temp[1024];		/* Temporary string */
   cups_file_t	*reqfile;		/* File to send */
   ssize_t	bytes;			/* Bytes read/written */
-  char		buffer[131072];		/* Copy buffer */
+  char		buffer[1024 * 1024];	/* Copy buffer */
   size_t	widths[200];		/* Width of columns */
   const char	*error;			/* Current error */
 
@@ -1208,7 +1208,10 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
   */
 
   if (data->monitor_uri)
+  {
+    data->monitor_done   = 0;
     data->monitor_thread = _cupsThreadCreate((_cups_thread_func_t)do_monitor_printer_state, data);
+  }
 
  /*
   * Take over control of the attributes in the request...
@@ -1649,36 +1652,38 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
         status_ok   = 1;
         repeat_test = 1;
       }
-
-      for (i = 0, status_ok = 0; i < data->num_statuses; i ++)
+      else
       {
-	if (data->statuses[i].if_defined &&
-	    !_ippVarsGet(data->vars, data->statuses[i].if_defined))
-	  continue;
-
-	if (data->statuses[i].if_not_defined &&
-	    _ippVarsGet(data->vars, data->statuses[i].if_not_defined))
-	  continue;
-
-	if (ippGetStatusCode(response) == data->statuses[i].status)
+	for (i = 0, status_ok = 0; i < data->num_statuses; i ++)
 	{
-	  status_ok = 1;
+	  if (data->statuses[i].if_defined &&
+	      !_ippVarsGet(data->vars, data->statuses[i].if_defined))
+	    continue;
 
-	  if (data->statuses[i].repeat_match && repeat_count < data->statuses[i].repeat_limit)
-	    repeat_test = 1;
+	  if (data->statuses[i].if_not_defined &&
+	      _ippVarsGet(data->vars, data->statuses[i].if_not_defined))
+	    continue;
 
-	  if (data->statuses[i].define_match)
-	    _ippVarsSet(data->vars, data->statuses[i].define_match, "1");
-	}
-	else
-	{
-	  if (data->statuses[i].repeat_no_match && repeat_count < data->statuses[i].repeat_limit)
-	    repeat_test = 1;
-
-	  if (data->statuses[i].define_no_match)
+	  if (ippGetStatusCode(response) == data->statuses[i].status)
 	  {
-	    _ippVarsSet(data->vars, data->statuses[i].define_no_match, "1");
 	    status_ok = 1;
+
+	    if (data->statuses[i].repeat_match && repeat_count < data->statuses[i].repeat_limit)
+	      repeat_test = 1;
+
+	    if (data->statuses[i].define_match)
+	      _ippVarsSet(data->vars, data->statuses[i].define_match, "1");
+	  }
+	  else
+	  {
+	    if (data->statuses[i].repeat_no_match && repeat_count < data->statuses[i].repeat_limit)
+	      repeat_test = 1;
+
+	    if (data->statuses[i].define_no_match)
+	    {
+	      _ippVarsSet(data->vars, data->statuses[i].define_no_match, "1");
+	      status_ok = 1;
+	    }
 	  }
 	}
       }
@@ -1855,6 +1860,9 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
 	    }
 	  }
 
+	  if (found && expect->display_match && (data->output == IPPTOOL_OUTPUT_TEST || (data->output == IPPTOOL_OUTPUT_PLIST && data->outfile != cupsFileStdout())))
+	    cupsFilePrintf(cupsFileStdout(), "\n%s\n\n", expect->display_match);
+
 	  if (found && expect->define_match)
 	    _ippVarsSet(data->vars, expect->define_match, "1");
 
@@ -2003,6 +2011,42 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
       print_ippserver_attr(data, attrptr, 0);
     }
   }
+  else if (data->output == IPPTOOL_OUTPUT_JSON && response)
+  {
+    ipp_tag_t	cur_tag = IPP_TAG_ZERO,	/* Current group tag */
+		group_tag;		/* Attribute's group tag */
+
+    cupsFilePuts(data->outfile, "[\n");
+    attrptr = ippFirstAttribute(response);
+    while (attrptr)
+    {
+      group_tag = ippGetGroupTag(attrptr);
+
+      if (group_tag && ippGetName(attrptr))
+      {
+	if (group_tag != cur_tag)
+	{
+	  if (cur_tag)
+	    cupsFilePuts(data->outfile, "    },\n");
+
+	  cupsFilePrintf(data->outfile, "    {\n        \"group-tag\": \"%s\",\n", ippTagString(group_tag));
+	  cur_tag = group_tag;
+	}
+
+	print_json_attr(data, attrptr, 8);
+	attrptr = ippNextAttribute(response);
+	cupsFilePuts(data->outfile, ippGetName(attrptr) && ippGetGroupTag(attrptr) == cur_tag ? ",\n" : "\n");
+      }
+      else
+      {
+	attrptr = ippNextAttribute(response);
+      }
+    }
+
+    if (cur_tag)
+      cupsFilePuts(data->outfile, "    }\n");
+    cupsFilePuts(data->outfile, "]\n");
+  }
 
   if (data->output == IPPTOOL_OUTPUT_TEST || (data->output == IPPTOOL_OUTPUT_PLIST && data->outfile != cupsFileStdout()))
   {
@@ -2056,9 +2100,9 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
       if (attrptr)
       {
 	if (data->output == IPPTOOL_OUTPUT_CSV)
-	  print_csv(data, response, attrptr, data->num_displayed, data->displayed, widths);
+	  attrptr = print_csv(data, response, attrptr, data->num_displayed, data->displayed, widths);
 	else
-	  print_line(data, response, attrptr, data->num_displayed, data->displayed, widths);
+	  attrptr = print_line(data, response, attrptr, data->num_displayed, data->displayed, widths);
 
 	while (attrptr && ippGetGroupTag(attrptr) > IPP_TAG_OPERATION)
 	  attrptr = ippNextAttribute(response);
@@ -2123,36 +2167,25 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
 
   for (i = 0; i < data->num_statuses; i ++)
   {
-    if (data->statuses[i].if_defined)
-      free(data->statuses[i].if_defined);
-    if (data->statuses[i].if_not_defined)
-      free(data->statuses[i].if_not_defined);
-    if (data->statuses[i].define_match)
-      free(data->statuses[i].define_match);
-    if (data->statuses[i].define_no_match)
-      free(data->statuses[i].define_no_match);
+    free(data->statuses[i].if_defined);
+    free(data->statuses[i].if_not_defined);
+    free(data->statuses[i].define_match);
+    free(data->statuses[i].define_no_match);
   }
   data->num_statuses = 0;
 
   for (i = data->num_expects, expect = data->expects; i > 0; i --, expect ++)
   {
     free(expect->name);
-    if (expect->of_type)
-      free(expect->of_type);
-    if (expect->same_count_as)
-      free(expect->same_count_as);
-    if (expect->if_defined)
-      free(expect->if_defined);
-    if (expect->if_not_defined)
-      free(expect->if_not_defined);
-    if (expect->with_value)
-      free(expect->with_value);
-    if (expect->define_match)
-      free(expect->define_match);
-    if (expect->define_no_match)
-      free(expect->define_no_match);
-    if (expect->define_value)
-      free(expect->define_value);
+    free(expect->of_type);
+    free(expect->same_count_as);
+    free(expect->if_defined);
+    free(expect->if_not_defined);
+    free(expect->with_value);
+    free(expect->define_match);
+    free(expect->define_no_match);
+    free(expect->define_value);
+    free(expect->display_match);
   }
   data->num_expects = 0;
 
@@ -2166,22 +2199,15 @@ do_test(_ipp_file_t    *f,		/* I - IPP data file */
   for (i = data->num_monitor_expects, expect = data->monitor_expects; i > 0; i --, expect ++)
   {
     free(expect->name);
-    if (expect->of_type)
-      free(expect->of_type);
-    if (expect->same_count_as)
-      free(expect->same_count_as);
-    if (expect->if_defined)
-      free(expect->if_defined);
-    if (expect->if_not_defined)
-      free(expect->if_not_defined);
-    if (expect->with_value)
-      free(expect->with_value);
-    if (expect->define_match)
-      free(expect->define_match);
-    if (expect->define_no_match)
-      free(expect->define_no_match);
-    if (expect->define_value)
-      free(expect->define_value);
+    free(expect->of_type);
+    free(expect->same_count_as);
+    free(expect->if_defined);
+    free(expect->if_not_defined);
+    free(expect->with_value);
+    free(expect->define_match);
+    free(expect->define_no_match);
+    free(expect->define_value);
+    free(expect->display_match);
   }
   data->num_monitor_expects = 0;
 
@@ -2713,6 +2739,7 @@ parse_monitor_printer_state(
 	_cups_strcasecmp(token, "DEFINE-MATCH") &&
 	_cups_strcasecmp(token, "DEFINE-NO-MATCH") &&
 	_cups_strcasecmp(token, "DEFINE-VALUE") &&
+	_cups_strcasecmp(token, "DISPLAY-MATCH") &&
 	_cups_strcasecmp(token, "IF-DEFINED") &&
 	_cups_strcasecmp(token, "IF-NOT-DEFINED") &&
 	_cups_strcasecmp(token, "IN-GROUP") &&
@@ -2837,6 +2864,24 @@ parse_monitor_printer_state(
       else
       {
 	print_fatal_error(data, "DEFINE-VALUE without a preceding EXPECT on line %d of \"%s\".", f->linenum, f->filename);
+	return (0);
+      }
+    }
+    else if (!_cups_strcasecmp(token, "DISPLAY-MATCH"))
+    {
+      if (!_ippFileReadToken(f, temp, sizeof(temp)))
+      {
+	print_fatal_error(data, "Missing DISPLAY-MATCH message on line %d of \"%s\".", f->linenum, f->filename);
+	return (0);
+      }
+
+      if (data->last_expect)
+      {
+	data->last_expect->display_match = strdup(temp);
+      }
+      else
+      {
+	print_fatal_error(data, "DISPLAY-MATCH without a preceding EXPECT on line %d of \"%s\".", f->linenum, f->filename);
 	return (0);
       }
     }
@@ -3138,7 +3183,7 @@ pause_message(const char *message)	/* I - Message */
   * Display the prompt...
   */
 
-  cupsFilePrintf(cupsFileStdout(), "%s\n---- PRESS ANY KEY ----", message);
+  cupsFilePrintf(cupsFileStdout(), "\n%s\n\n---- PRESS ANY KEY ----", message);
 
 #ifdef _WIN32
  /*
@@ -3181,10 +3226,10 @@ pause_message(const char *message)	/* I - Message */
  */
 
 static void
-print_attr(cups_file_t     *outfile,	/* I  - Output file */
-           ipptool_output_t  output,	/* I  - Output format */
-           ipp_attribute_t *attr,	/* I  - Attribute to print */
-           ipp_tag_t       *group)	/* IO - Current group */
+print_attr(cups_file_t      *outfile,	/* I  - Output file */
+           ipptool_output_t output,	/* I  - Output format */
+           ipp_attribute_t  *attr,	/* I  - Attribute to print */
+           ipp_tag_t        *group)	/* IO - Current group */
 {
   int			i,		/* Looping var */
 			count;		/* Number of values */
@@ -3338,21 +3383,20 @@ print_attr(cups_file_t     *outfile,	/* I  - Output file */
  * 'print_csv()' - Print a line of CSV text.
  */
 
-static void
+static ipp_attribute_t *		/* O - Next attribute */
 print_csv(
-    ipptool_test_t *data,		/* I - Test data */
-    ipp_t            *ipp,		/* I - Response message */
-    ipp_attribute_t  *attr,		/* I - First attribute for line */
-    int              num_displayed,	/* I - Number of attributes to display */
-    char             **displayed,	/* I - Attributes to display */
-    size_t           *widths)		/* I - Column widths */
+    ipptool_test_t  *data,		/* I - Test data */
+    ipp_t           *ipp,		/* I - Response message */
+    ipp_attribute_t *attr,		/* I - First attribute for line */
+    int             num_displayed,	/* I - Number of attributes to display */
+    char            **displayed,	/* I - Attributes to display */
+    size_t          *widths)		/* I - Column widths */
 {
   int		i;			/* Looping var */
   size_t	maxlength;		/* Max length of all columns */
-  char		*buffer,		/* String buffer */
-		*bufptr;		/* Pointer into buffer */
-  ipp_attribute_t *current;		/* Current attribute */
-
+  ipp_attribute_t *current = attr;	/* Current attribute */
+  char		*values[MAX_DISPLAY],	/* Strings to display */
+		*valptr;		/* Pointer into value */
 
  /*
   * Get the maximum string length we have to show and allocate...
@@ -3364,63 +3408,76 @@ print_csv(
 
   maxlength += 2;
 
-  if ((buffer = malloc(maxlength)) == NULL)
-    return;
-
  /*
   * Loop through the attributes to display...
   */
 
   if (attr)
   {
+    // Collect the values...
+    memset(values, 0, sizeof(values));
+
+    for (; current; current = ippNextAttribute(ipp))
+    {
+      if (!ippGetName(current))
+	break;
+
+      for (i = 0; i < num_displayed; i ++)
+      {
+        if (!strcmp(ippGetName(current), displayed[i]))
+        {
+          if ((values[i] = (char *)calloc(1, maxlength)) != NULL)
+	    ippAttributeString(current, values[i], maxlength);
+          break;
+	}
+      }
+    }
+
+    // Output the line...
     for (i = 0; i < num_displayed; i ++)
     {
       if (i)
         cupsFilePutChar(data->outfile, ',');
 
-      buffer[0] = '\0';
+      if (!values[i])
+        continue;
 
-      for (current = attr; current; current = ippNextAttribute(ipp))
+      if (strchr(values[i], ',') != NULL || strchr(values[i], '\"') != NULL || strchr(values[i], '\\') != NULL)
       {
-        if (!ippGetName(current))
-          break;
-        else if (!strcmp(ippGetName(current), displayed[i]))
+        // Quoted value...
+        cupsFilePutChar(data->outfile, '\"');
+        for (valptr = values[i]; *valptr; valptr ++)
         {
-          ippAttributeString(current, buffer, maxlength);
-          break;
+          if (*valptr == '\\' || *valptr == '\"')
+            cupsFilePutChar(data->outfile, '\\');
+          cupsFilePutChar(data->outfile, *valptr);
         }
-      }
-
-      if (strchr(buffer, ',') != NULL || strchr(buffer, '\"') != NULL ||
-	  strchr(buffer, '\\') != NULL)
-      {
-        cupsFilePutChar(cupsFileStdout(), '\"');
-        for (bufptr = buffer; *bufptr; bufptr ++)
-        {
-          if (*bufptr == '\\' || *bufptr == '\"')
-            cupsFilePutChar(cupsFileStdout(), '\\');
-          cupsFilePutChar(cupsFileStdout(), *bufptr);
-        }
-        cupsFilePutChar(cupsFileStdout(), '\"');
+        cupsFilePutChar(data->outfile, '\"');
       }
       else
-        cupsFilePuts(data->outfile, buffer);
+      {
+        // Unquoted value...
+        cupsFilePuts(data->outfile, values[i]);
+      }
+
+      free(values[i]);
     }
-    cupsFilePutChar(cupsFileStdout(), '\n');
+    cupsFilePutChar(data->outfile, '\n');
   }
   else
   {
+    // Show column headings...
     for (i = 0; i < num_displayed; i ++)
     {
       if (i)
-        cupsFilePutChar(cupsFileStdout(), ',');
+        cupsFilePutChar(data->outfile, ',');
 
       cupsFilePuts(data->outfile, displayed[i]);
     }
-    cupsFilePutChar(cupsFileStdout(), '\n');
+    cupsFilePutChar(data->outfile, '\n');
   }
 
-  free(buffer);
+  return (current);
 }
 
 
@@ -3461,7 +3518,7 @@ print_fatal_error(
 
 
 /*
- * 'print_ippserver_attr()' - Print a attribute suitable for use by ippserver.
+ * 'print_ippserver_attr()' - Print an attribute suitable for use by ippserver.
  */
 
 static void
@@ -3578,15 +3635,280 @@ print_ippserver_attr(
 static void
 print_ippserver_string(
     ipptool_test_t *data,		/* I - Test data */
-    const char       *s,		/* I - String to print */
-    size_t           len)		/* I - Length of string */
+    const char     *s,			/* I - String to print */
+    size_t         len)			/* I - Length of string */
 {
   cupsFilePutChar(data->outfile, '\"');
   while (len > 0)
   {
-    if (*s == '\"')
+    if (*s == '\"' || *s == '\\')
       cupsFilePutChar(data->outfile, '\\');
     cupsFilePutChar(data->outfile, *s);
+
+    s ++;
+    len --;
+  }
+  cupsFilePutChar(data->outfile, '\"');
+}
+
+
+/*
+ * 'print_json_attr()' - Print an attribute in JSON format.
+ */
+
+static void
+print_json_attr(
+    ipptool_test_t  *data,		/* I - Test data */
+    ipp_attribute_t *attr,		/* I - IPP attribute */
+    int             indent)		/* I - Indentation */
+{
+  const char	*name = ippGetName(attr);
+					/* Name of attribute */
+  int		i,			/* Looping var */
+		count = ippGetCount(attr);
+					/* Number of values */
+  ipp_attribute_t *colattr;		/* Collection attribute */
+
+
+  cupsFilePrintf(data->outfile, "%*s", indent, "");
+  print_json_string(data, name, strlen(name));
+
+  switch (ippGetValueTag(attr))
+  {
+    case IPP_TAG_INTEGER :
+    case IPP_TAG_ENUM :
+        if (count == 1)
+        {
+	  cupsFilePrintf(data->outfile, ": %d", ippGetInteger(attr, 0));
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	    cupsFilePrintf(data->outfile, "%*s%d%s", indent + 4, "", ippGetInteger(attr, i), (i + 1) < count ? ",\n" : "\n");
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_BOOLEAN :
+        if (count == 1)
+        {
+	  cupsFilePrintf(data->outfile, ": %s", ippGetBoolean(attr, 0) ? "true" : "false");
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	    cupsFilePrintf(data->outfile, "%*s%s%s", indent + 4, "", ippGetBoolean(attr, i) ? "true" : "false", (i + 1) < count ? ",\n" : "\n");
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_RANGE :
+        if (count == 1)
+        {
+	  int upper, lower = ippGetRange(attr, 0, &upper);
+
+	  cupsFilePrintf(data->outfile, ": {\n%*s\"lower\": %d,\n%*s\"upper\":%d\n%*s}", indent + 4, "", lower, indent + 4, "", upper, indent, "");
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	  {
+	    int upper, lower = ippGetRange(attr, i, &upper);
+
+	    cupsFilePrintf(data->outfile, "%*s{\n%*s\"lower\": %d,\n%*s\"upper\":%d\n%*s},\n", indent + 4, "", indent + 8, "", lower, indent + 8, "", upper, indent + 4, "");
+	  }
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_RESOLUTION :
+        if (count == 1)
+        {
+	  ipp_res_t units;
+	  int yres, xres = ippGetResolution(attr, 0, &yres, &units);
+
+	  cupsFilePrintf(data->outfile, ": {\n%*s\"units\": \"%s\",\n%*s\"xres\": %d,\n%*s\"yres\":%d\n%*s}", indent + 4, "", units == IPP_RES_PER_INCH ? "dpi" : "dpcm", indent + 4, "", xres, indent + 4, "", yres, indent, "");
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	  {
+	    ipp_res_t units;
+	    int yres, xres = ippGetResolution(attr, i, &yres, &units);
+
+	    cupsFilePrintf(data->outfile, "%*s{\n%*s\"units\": \"%s\",\n%*s\"xres\": %d,\n%*s\"yres\":%d\n%*s},\n", indent + 4, "", indent + 8, "", units == IPP_RES_PER_INCH ? "dpi" : "dpcm", indent + 8, "", xres, indent + 8, "", yres, indent + 4, "");
+	  }
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_DATE :
+        if (count == 1)
+        {
+	  cupsFilePrintf(data->outfile, ": \"%s\"", iso_date(ippGetDate(attr, 0)));
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	    cupsFilePrintf(data->outfile, "%*s\"%s\"%s", indent + 4, "", iso_date(ippGetDate(attr, i)), (i + 1) < count ? ",\n" : "\n");
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_STRING :
+        if (count == 1)
+        {
+	  int len;
+	  const char *s = (const char *)ippGetOctetString(attr, 0, &len);
+
+	  cupsFilePuts(data->outfile, ": \"");
+	  while (len > 0)
+	  {
+	    cupsFilePrintf(data->outfile, "%02X", *s++ & 255);
+	    len --;
+	  }
+	  cupsFilePuts(data->outfile, "\"");
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	  {
+	    int len;
+	    const char *s = (const char *)ippGetOctetString(attr, i, &len);
+
+	    cupsFilePrintf(data->outfile, "%*s\"", indent + 4, "");
+	    while (len > 0)
+	    {
+	      cupsFilePrintf(data->outfile, "%02X", *s++ & 255);
+	      len --;
+	    }
+	    cupsFilePuts(data->outfile, (i + 1) < count ? "\",\n" : "\"\n");
+	  }
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_TEXT :
+    case IPP_TAG_TEXTLANG :
+    case IPP_TAG_NAME :
+    case IPP_TAG_NAMELANG :
+    case IPP_TAG_KEYWORD :
+    case IPP_TAG_URI :
+    case IPP_TAG_URISCHEME :
+    case IPP_TAG_CHARSET :
+    case IPP_TAG_LANGUAGE :
+    case IPP_TAG_MIMETYPE :
+        if (count == 1)
+        {
+	  const char *s = ippGetString(attr, 0, NULL);
+
+	  cupsFilePuts(data->outfile, ": ");
+	  print_json_string(data, s, strlen(s));
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	  {
+	    const char *s = ippGetString(attr, i, NULL);
+
+	    cupsFilePrintf(data->outfile, "%*s", indent + 4, "");
+	    print_json_string(data, s, strlen(s));
+	    cupsFilePuts(data->outfile, (i + 1) < count ? ",\n" : "\n");
+	  }
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    case IPP_TAG_BEGIN_COLLECTION :
+        if (count == 1)
+        {
+	  ipp_t *col = ippGetCollection(attr, 0);
+
+	  cupsFilePuts(data->outfile, ": {\n");
+	  colattr = ippFirstAttribute(col);
+	  while (colattr)
+	  {
+	    print_json_attr(data, colattr, indent + 4);
+	    colattr = ippNextAttribute(col);
+	    cupsFilePuts(data->outfile, colattr ? ",\n" : "\n");
+	  }
+	  cupsFilePrintf(data->outfile, "%*s}", indent, "");
+        }
+        else
+        {
+          cupsFilePuts(data->outfile, ": [\n");
+	  for (i = 0; i < count; i ++)
+	  {
+	    ipp_t *col = ippGetCollection(attr, i);
+
+	    cupsFilePrintf(data->outfile, "%*s{\n", indent + 4, "");
+	    colattr = ippFirstAttribute(col);
+	    while (colattr)
+	    {
+	      print_json_attr(data, colattr, indent + 8);
+	      colattr = ippNextAttribute(col);
+	      cupsFilePuts(data->outfile, colattr ? ",\n" : "\n");
+	    }
+	    cupsFilePrintf(data->outfile, "%*s}%s", indent + 4, "", (i + 1) < count ? ",\n" : "\n");
+	  }
+          cupsFilePrintf(data->outfile, "%*s]", indent, "");
+	}
+	break;
+
+    default :
+        /* Out-of-band value */
+	break;
+  }
+}
+
+
+/* 
+ * 'print_json_string()' - Print a string in JSON format.
+ */
+
+static void
+print_json_string(
+    ipptool_test_t *data,		/* I - Test data */
+    const char     *s,			/* I - String to print */
+    size_t         len)			/* I - Length of string */
+{
+  cupsFilePutChar(data->outfile, '\"');
+  while (len > 0)
+  {
+    switch (*s)
+    {
+      case '\"' :
+      case '\\' :
+          cupsFilePutChar(data->outfile, '\\');
+	  cupsFilePutChar(data->outfile, *s);
+	  break;
+
+      case '\n' :
+	  cupsFilePuts(data->outfile, "\\n");
+	  break;
+
+      case '\r' :
+	  cupsFilePuts(data->outfile, "\\r");
+	  break;
+
+      case '\t' :
+	  cupsFilePuts(data->outfile, "\\t");
+	  break;
+
+      default :
+          if (*s < ' ' && *s >= 0)
+            cupsFilePrintf(data->outfile, "\\%03o", *s);
+          else
+	    cupsFilePutChar(data->outfile, *s);
+	  break;
+    }
 
     s ++;
     len --;
@@ -3599,7 +3921,7 @@ print_ippserver_string(
  * 'print_line()' - Print a line of formatted or CSV text.
  */
 
-static void
+static ipp_attribute_t *		/* O - Next attribute */
 print_line(
     ipptool_test_t *data,		/* I - Test data */
     ipp_t            *ipp,		/* I - Response message */
@@ -3610,8 +3932,8 @@ print_line(
 {
   int		i;			/* Looping var */
   size_t	maxlength;		/* Max length of all columns */
-  char		*buffer;		/* String buffer */
-  ipp_attribute_t *current;		/* Current attribute */
+  ipp_attribute_t *current = attr;	/* Current attribute */
+  char		*values[MAX_DISPLAY];	/* Strings to display */
 
 
  /*
@@ -3624,61 +3946,74 @@ print_line(
 
   maxlength += 2;
 
-  if ((buffer = malloc(maxlength)) == NULL)
-    return;
-
  /*
   * Loop through the attributes to display...
   */
 
   if (attr)
   {
+    // Collect the values...
+    memset(values, 0, sizeof(values));
+
+    for (; current; current = ippNextAttribute(ipp))
+    {
+      if (!ippGetName(current))
+	break;
+
+      for (i = 0; i < num_displayed; i ++)
+      {
+        if (!strcmp(ippGetName(current), displayed[i]))
+        {
+          if ((values[i] = (char *)calloc(1, maxlength)) != NULL)
+	    ippAttributeString(current, values[i], maxlength);
+          break;
+	}
+      }
+    }
+
+    // Output the line...
     for (i = 0; i < num_displayed; i ++)
     {
       if (i)
-        cupsFilePutChar(cupsFileStdout(), ' ');
+        cupsFilePutChar(data->outfile, ' ');
 
-      buffer[0] = '\0';
-
-      for (current = attr; current; current = ippNextAttribute(ipp))
-      {
-        if (!ippGetName(current))
-          break;
-        else if (!strcmp(ippGetName(current), displayed[i]))
-        {
-          ippAttributeString(current, buffer, maxlength);
-          break;
-        }
-      }
-
-      cupsFilePrintf(data->outfile, "%*s", (int)-widths[i], buffer);
+      cupsFilePrintf(data->outfile, "%*s", (int)-widths[i], values[i] ? values[i] : "");
+      free(values[i]);
     }
-    cupsFilePutChar(cupsFileStdout(), '\n');
+    cupsFilePutChar(data->outfile, '\n');
   }
   else
   {
+    // Show column headings...
+    char *buffer = (char *)malloc(maxlength);
+					// Buffer for separator lines
+
+    if (!buffer)
+      return (current);
+
     for (i = 0; i < num_displayed; i ++)
     {
       if (i)
-        cupsFilePutChar(cupsFileStdout(), ' ');
+        cupsFilePutChar(data->outfile, ' ');
 
       cupsFilePrintf(data->outfile, "%*s", (int)-widths[i], displayed[i]);
     }
-    cupsFilePutChar(cupsFileStdout(), '\n');
+    cupsFilePutChar(data->outfile, '\n');
 
     for (i = 0; i < num_displayed; i ++)
     {
       if (i)
-	cupsFilePutChar(cupsFileStdout(), ' ');
+	cupsFilePutChar(data->outfile, ' ');
 
       memset(buffer, '-', widths[i]);
       buffer[widths[i]] = '\0';
       cupsFilePuts(data->outfile, buffer);
     }
-    cupsFilePutChar(cupsFileStdout(), '\n');
+    cupsFilePutChar(data->outfile, '\n');
+    free(buffer);
   }
 
-  free(buffer);
+  return (current);
 }
 
 
@@ -3918,6 +4253,7 @@ token_cb(_ipp_file_t    *f,		/* I - IPP file data */
 	_cups_strcasecmp(token, "DEFINE-MATCH") &&
 	_cups_strcasecmp(token, "DEFINE-NO-MATCH") &&
 	_cups_strcasecmp(token, "DEFINE-VALUE") &&
+	_cups_strcasecmp(token, "DISPLAY-MATCH") &&
 	_cups_strcasecmp(token, "IF-DEFINED") &&
 	_cups_strcasecmp(token, "IF-NOT-DEFINED") &&
 	_cups_strcasecmp(token, "IN-GROUP") &&
@@ -4032,8 +4368,15 @@ token_cb(_ipp_file_t    *f,		/* I - IPP file data */
       * Name of test...
       */
 
-      _ippFileReadToken(f, temp, sizeof(temp));
-      _ippVarsExpand(vars, data->name, temp, sizeof(data->name));
+      if (_ippFileReadToken(f, temp, sizeof(temp)))
+      {
+        _ippVarsExpand(vars, data->name, temp, sizeof(data->name));
+      }
+      else
+      {
+	print_fatal_error(data, "Missing NAME string on line %d of \"%s\".", f->linenum, f->filename);
+	return (0);
+      }
     }
     else if (!_cups_strcasecmp(token, "PAUSE"))
     {
@@ -4556,6 +4899,24 @@ token_cb(_ipp_file_t    *f,		/* I - IPP file data */
       else
       {
 	print_fatal_error(data, "DEFINE-VALUE without a preceding EXPECT on line %d of \"%s\".", f->linenum, f->filename);
+	return (0);
+      }
+    }
+    else if (!_cups_strcasecmp(token, "DISPLAY-MATCH"))
+    {
+      if (!_ippFileReadToken(f, temp, sizeof(temp)))
+      {
+	print_fatal_error(data, "Missing DISPLAY-MATCH mesaage on line %d of \"%s\".", f->linenum, f->filename);
+	return (0);
+      }
+
+      if (data->last_expect)
+      {
+	data->last_expect->display_match = strdup(temp);
+      }
+      else
+      {
+	print_fatal_error(data, "DISPLAY-MATCH without a preceding EXPECT on line %d of \"%s\".", f->linenum, f->filename);
 	return (0);
       }
     }
@@ -5333,6 +5694,7 @@ with_distinct_values(
     case IPP_TAG_CHARSET :
     case IPP_TAG_LANGUAGE :
     case IPP_TAG_MIMETYPE :
+    case IPP_TAG_BEGIN_COLLECTION :
         break;
 
     default :
@@ -5380,6 +5742,29 @@ with_distinct_values(
       case IPP_TAG_LANGUAGE :
       case IPP_TAG_MIMETYPE :
           value = ippGetString(attr, i, NULL);
+          break;
+      case IPP_TAG_BEGIN_COLLECTION :
+          {
+            ipp_t	*col = ippGetCollection(attr, i);
+					// Collection value
+            ipp_attribute_t *member;	// Member attribute
+            char	*bufptr,	// Pointer into buffer
+			*bufend,	// End of buffer
+			prefix;		// Prefix character
+
+            for (prefix = '{', bufptr = buffer, bufend = buffer + sizeof(buffer) - 2, member = ippFirstAttribute(col); member && bufptr < bufend; member = ippNextAttribute(col))
+            {
+              *bufptr++ = prefix;
+              prefix    = ' ';
+
+              ippAttributeString(member, bufptr, (size_t)(bufend - bufptr));
+              bufptr += strlen(bufptr);
+            }
+
+            *bufptr++ = '}';
+            *bufptr   = '\0';
+            value     = buffer;
+          }
           break;
       default : // Should never happen
           value = "unsupported";

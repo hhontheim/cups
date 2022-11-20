@@ -1,7 +1,7 @@
 /*
  * Client definitions for the CUPS scheduler.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2018 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -90,8 +90,6 @@ typedef struct
 
 VAR int			LastClientNumber VALUE(0),
 					/* Last client connection number */
-			ListenBackLog	VALUE(SOMAXCONN),
-					/* Max backlog of pending connections */
 			LocalPort	VALUE(631),
 					/* Local port to use */
 			RemotePort	VALUE(0);

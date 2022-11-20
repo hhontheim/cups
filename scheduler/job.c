@@ -1,6 +1,7 @@
 /*
  * Job management routines for the CUPS scheduler.
  *
+ * Copyright © 2022 by OpenPrinting.
  * Copyright © 2007-2019 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -501,6 +502,7 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
   int			backroot;	/* Run backend as root? */
   int			pid;		/* Process ID of new filter process */
   int			banner_page;	/* 1 if banner page, 0 otherwise */
+  int			raw_file;       /* 1 if file type is vnd.cups-raw */
   int			filterfds[2][2] = { { -1, -1 }, { -1, -1 } };
 					/* Pipes used between filters */
   int			envc;		/* Number of environment variables */
@@ -540,10 +542,8 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
 					/* PRINTER_LOCATION env variable */
 			printer_name[255],
 					/* PRINTER env variable */
-			*printer_state_reasons = NULL,
+			*printer_state_reasons = NULL;
 					/* PRINTER_STATE_REASONS env var */
-			rip_max_cache[255];
-					/* RIP_MAX_CACHE env variable */
 
 
   cupsdLogMessage(CUPSD_LOG_DEBUG2,
@@ -585,6 +585,8 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
     if (stat(filename, &fileinfo))
       fileinfo.st_size = 0;
 
+    _cupsRWLockWrite(&MimeDatabase->lock);
+
     if (job->retry_as_raster)
     {
      /*
@@ -619,6 +621,9 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
       abort_state   = IPP_JOB_ABORTED;
 
       ippSetString(job->attrs, &job->reasons, 0, "document-unprintable-error");
+
+      _cupsRWUnlock(&MimeDatabase->lock);
+
       goto abort_job;
     }
 
@@ -705,6 +710,8 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
       cupsArrayDelete(filters);
       filters = prefilters;
     }
+
+    _cupsRWUnlock(&MimeDatabase->lock);
   }
 
  /*
@@ -746,8 +753,11 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
   * Add decompression/raw filter as needed...
   */
 
+  raw_file = !strcmp(job->filetypes[job->current_file]->super, "application") &&
+    !strcmp(job->filetypes[job->current_file]->type, "vnd.cups-raw");
+
   if ((job->compressions[job->current_file] && (!job->printer->remote || job->num_files == 1)) ||
-      (!job->printer->remote && job->printer->raw && job->num_files > 1))
+      (!job->printer->remote && (job->printer->raw || raw_file) && job->num_files > 1))
   {
    /*
     * Add gziptoany filter to the front of the list...
@@ -1047,7 +1057,6 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
   envp[envc ++] = apple_language;
 #endif /* __APPLE__ */
   envp[envc ++] = ppd;
-  envp[envc ++] = rip_max_cache;
   envp[envc ++] = content_type;
   envp[envc ++] = device_uri;
   envp[envc ++] = printer_info;
@@ -1260,7 +1269,7 @@ cupsdContinueJob(cupsd_job_t *job)	/* I - Job */
 
       if (pid == 0)
       {
-	abort_message = "Stopping job because the sheduler could not execute "
+	abort_message = "Stopping job because the scheduler could not execute "
 			"the backend.";
 
         goto abort_job;
@@ -1914,6 +1923,8 @@ cupsdLoadJob(cupsd_job_t *job)		/* I - Job */
     * Find all the d##### files...
     */
 
+    _cupsRWLockRead(&MimeDatabase->lock);
+
     for (fileid = 1; fileid < 10000; fileid ++)
     {
       snprintf(jobfile, sizeof(jobfile), "%s/d%05d-%03d", RequestRoot,
@@ -1978,6 +1989,8 @@ cupsdLoadJob(cupsd_job_t *job)		/* I - Job */
         job->filetypes[fileid - 1] = mimeType(MimeDatabase, "application",
 	                                      "vnd.cups-raw");
     }
+
+    _cupsRWUnlock(&MimeDatabase->lock);
   }
 
  /*
@@ -2178,11 +2191,8 @@ cupsdSaveAllJobs(void)
 {
   int		i;			/* Looping var */
   cups_file_t	*fp;			/* job.cache file */
-  char		filename[1024],		/* job.cache filename */
-		temp[1024];		/* Temporary string */
+  char		filename[1024];		/* job.cache filename */
   cupsd_job_t	*job;			/* Current job */
-  time_t	curtime;		/* Current time */
-  struct tm	curdate;		/* Current date */
 
 
   snprintf(filename, sizeof(filename), "%s/job.cache", CacheDir);
@@ -2194,10 +2204,6 @@ cupsdSaveAllJobs(void)
  /*
   * Write a small header to the file...
   */
-
-  time(&curtime);
-  localtime_r(&curtime, &curdate);
-  strftime(temp, sizeof(temp) - 1, "%Y-%m-%d %H:%M", &curdate);
 
   cupsFilePuts(fp, "# Job cache file for " CUPS_SVERSION "\n");
   cupsFilePrintf(fp, "# Written by cupsd\n");
@@ -3118,8 +3124,7 @@ finalize_job(cupsd_job_t *job,		/* I - Job */
   * rarely have current information for network devices...
   */
 
-  if (strncmp(job->printer->device_uri, "usb:", 4) &&
-      strncmp(job->printer->device_uri, "ippusb:", 7))
+  if (!strstr(job->printer->device_uri, "usb:"))
     cupsdSetPrinterReasons(job->printer, "-offline-report");
 
  /*
@@ -3476,6 +3481,12 @@ finalize_job(cupsd_job_t *job,		/* I - Job */
             if (strncmp(job->reasons->values[0].string.text, "account-", 8))
 	      ippSetString(job->attrs, &job->reasons, 0,
 			   "cups-held-for-authentication");
+
+            if (job->printer->num_auth_info_required == 1 && !strcmp(job->printer->auth_info_required[0], "none"))
+            {
+              // Default to "username,password" authentication if none is specified...
+              cupsdSetAuthInfoRequired(job->printer, "username,password", NULL);
+            }
           }
           break;
 
@@ -3859,6 +3870,23 @@ get_options(cupsd_job_t *job,		/* I - Job */
       num_pwgppds = cupsAddOption("OutputOrder", "Normal", num_pwgppds, &pwgppds);
     else if (!strncmp(page_delivery, "reverse-order", 13))
       num_pwgppds = cupsAddOption("OutputOrder", "Reverse", num_pwgppds, &pwgppds);
+  }
+
+ /*
+  * Map destination-uris value...
+  */
+
+  if ((job->printer->type & CUPS_PRINTER_FAX) && (attr = ippFindAttribute(job->attrs, "destination-uris", IPP_TAG_BEGIN_COLLECTION)) != NULL)
+  {
+    ipp_t *ipp = ippGetCollection(attr, 0);	// Collection value
+    const char *destination_uri = ippGetString(ippFindAttribute(ipp, "destination-uri", IPP_TAG_URI), 0, NULL);
+    const char *pre_dial_string = ippGetString(ippFindAttribute(ipp, "pre-dial-string", IPP_TAG_TEXT), 0, NULL);
+
+    if (destination_uri && !strncmp(destination_uri, "tel:", 4))
+      num_pwgppds = cupsAddOption("phone", destination_uri + 4, num_pwgppds, &pwgppds);
+
+    if (pre_dial_string)
+      num_pwgppds = cupsAddOption("faxPrefix", pre_dial_string, num_pwgppds, &pwgppds);
   }
 
  /*
@@ -4484,6 +4512,8 @@ load_job_cache(const char *filename)	/* I - job.cache filename */
 
       number --;
 
+      _cupsRWLockRead(&MimeDatabase->lock);
+
       job->compressions[number] = compression;
       job->filetypes[number]    = mimeType(MimeDatabase, super, type);
 
@@ -4510,6 +4540,8 @@ load_job_cache(const char *filename)	/* I - job.cache filename */
 	  job->filetypes[number] = mimeType(MimeDatabase, "application",
 	                                    "vnd.cups-raw");
       }
+
+      _cupsRWUnlock(&MimeDatabase->lock);
     }
     else
       cupsdLogMessage(CUPSD_LOG_ERROR, "Unknown %s directive on line %d of %s.", line, linenum, filename);

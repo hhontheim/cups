@@ -1,7 +1,7 @@
 /*
  * Configuration routines for the CUPS scheduler.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2018 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -101,7 +101,6 @@ static const cupsd_var_t	cupsd_vars[] =
   { "LaunchdTimeout",		&IdleExitTimeout,	CUPSD_VARTYPE_TIME },
 #endif /* HAVE_LAUNCHD */
   { "LimitRequestBody",		&MaxRequestSize,	CUPSD_VARTYPE_INTEGER },
-  { "ListenBackLog",		&ListenBackLog,		CUPSD_VARTYPE_INTEGER },
   { "LogDebugHistory",		&LogDebugHistory,	CUPSD_VARTYPE_INTEGER },
   { "MaxActiveJobs",		&MaxActiveJobs,		CUPSD_VARTYPE_INTEGER },
   { "MaxClients",		&MaxClients,		CUPSD_VARTYPE_INTEGER },
@@ -714,7 +713,6 @@ cupsdReadConfiguration(void)
   FilterNice               = 0;
   HostNameLookups          = FALSE;
   KeepAlive                = TRUE;
-  ListenBackLog            = SOMAXCONN;
   LogDebugHistory          = 200;
   LogFilePerm              = CUPS_DEFAULT_LOG_FILE_PERM;
   LogFileGroup             = Group;
@@ -1123,16 +1121,11 @@ cupsdReadConfiguration(void)
 			     Group, 1, 1) < 0 ||
        cupsdCheckPermissions(StateDir, NULL, 0755, RunUser,
 			     Group, 1, 1) < 0 ||
-       /* Inside a Snap cupsd is running as root without CAP_DAC_OVERRIDE
-	  capability, so certs directory has to be root.root-owned so that
-	  cupsd can access but not its unprivileged sub-processes. */
-#ifdef SUPPORT_SNAPPED_CUPSD
-       cupsdCheckPermissions(StateDir, "certs", 0711, RunUser,
-			     0, 1, 1) < 0 ||
+#if CUPS_SNAP
+       cupsdCheckPermissions(StateDir, "certs", 0711, RunUser, 0, 1, 1) < 0 ||
 #else
-       cupsdCheckPermissions(StateDir, "certs", RunUser ? 0711 : 0511, User,
-			     SystemGroupIDs[0], 1, 1) < 0 ||
-#endif /* SUPPORT_SNAPPED_CUPSD */
+       cupsdCheckPermissions(StateDir, "certs", RunUser ? 0711 : 0511, User, SystemGroupIDs[0], 1, 1) < 0 ||
+#endif /* CUPS_SNAP */
        cupsdCheckPermissions(ServerRoot, NULL, 0755, RunUser,
 			     Group, 1, 0) < 0 ||
        cupsdCheckPermissions(ServerRoot, "ppd", 0755, RunUser,
@@ -1567,11 +1560,14 @@ cupsdReadConfiguration(void)
 
     MimeDatabase = mimeNew();
     mimeSetErrorCallback(MimeDatabase, mime_error_cb, NULL);
+    _cupsRWInit(&MimeDatabase->lock);
 
+    _cupsRWLockWrite(&MimeDatabase->lock);
     MimeDatabase = mimeLoadTypes(MimeDatabase, mimedir);
     MimeDatabase = mimeLoadTypes(MimeDatabase, ServerRoot);
     MimeDatabase = mimeLoadFilters(MimeDatabase, mimedir, temp);
     MimeDatabase = mimeLoadFilters(MimeDatabase, ServerRoot, temp);
+    _cupsRWUnlock(&MimeDatabase->lock);
 
     if (!MimeDatabase)
     {

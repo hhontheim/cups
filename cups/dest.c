@@ -1,7 +1,7 @@
 /*
  * User-defined destination (and option) support for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2019 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products.
  *
@@ -272,7 +272,11 @@ cupsAddDest(const char  *name,		/* I  - Destination name */
   if (!cupsGetDest(name, instance, num_dests, *dests))
   {
     if (instance && !cupsGetDest(name, NULL, num_dests, *dests))
-      return (num_dests);
+    {
+      // Add destination first...
+      if (!cups_add_dest(name, NULL, &num_dests, dests))
+        return (num_dests);
+    }
 
     if ((dest = cups_add_dest(name, instance, &num_dests, dests)) == NULL)
       return (num_dests);
@@ -1138,7 +1142,7 @@ _cupsGetDestResource(
   DEBUG_printf(("1_cupsGetDestResource: device-uri=\"%s\", printer-uri-supported=\"%s\".", device_uri, printer_uri));
 
 #ifdef HAVE_DNSSD
-  if (((flags & CUPS_DEST_FLAGS_DEVICE) || !printer_uri) && strstr(device_uri, "._tcp"))
+  if (((flags & CUPS_DEST_FLAGS_DEVICE) || !printer_uri) && device_uri && strstr(device_uri, "._tcp"))
   {
     if ((device_uri = cups_dnssd_resolve(dest, device_uri, 5000, NULL, NULL, NULL)) != NULL)
     {
@@ -1786,7 +1790,11 @@ cupsGetNamedDest(http_t     *http,	/* I - Connection to server or @code CUPS_HTT
       * No default in the environment, try the user's lpoptions files...
       */
 
+#if _WIN32
+      snprintf(filename, sizeof(filename), "%s/AppData/Local/cups/lpoptions", cg->home);
+#else
       snprintf(filename, sizeof(filename), "%s/.cups/lpoptions", cg->home);
+#endif // _WIN32
 
       dest_name = cups_get_default(filename, defname, sizeof(defname), &instance);
 
@@ -1828,56 +1836,49 @@ cupsGetNamedDest(http_t     *http,	/* I - Connection to server or @code CUPS_HTT
 
   if (!_cupsGetDests(http, op, dest_name, &dest, 0, 0))
   {
-    if (name)
-    {
       _cups_namedata_t  data;           /* Callback data */
 
       DEBUG_puts("1cupsGetNamedDest: No queue found for printer, looking on network...");
 
-      data.name = name;
+      data.name = dest_name;
       data.dest = NULL;
 
       cupsEnumDests(0, 1000, NULL, 0, 0, (cups_dest_cb_t)cups_name_cb, &data);
 
       if (!data.dest)
       {
-        _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("The printer or class does not exist."), 1);
-        return (NULL);
+	switch (set_as_default)
+	{
+	  default :
+	      _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("The printer or class does not exist."), 1);
+	      break;
+
+	  case 1 : /* Set from env vars */
+	      if (getenv("LPDEST"))
+		_cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("LPDEST environment variable names default destination that does not exist."), 1);
+	      else if (getenv("PRINTER"))
+		_cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("PRINTER environment variable names default destination that does not exist."), 1);
+	      else
+		_cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("No default destination."), 1);
+	      break;
+
+	  case 2 : /* Set from ~/.cups/lpoptions */
+	      _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("~/.cups/lpoptions file names default destination that does not exist."), 1);
+	      break;
+
+	  case 3 : /* Set from /etc/cups/lpoptions */
+	      _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("/etc/cups/lpoptions file names default destination that does not exist."), 1);
+	      break;
+
+	  case 4 : /* Set from server */
+	      _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("No default destination."), 1);
+	      break;
+	}
+
+      return (NULL);
       }
 
       dest = data.dest;
-    }
-    else
-    {
-      switch (set_as_default)
-      {
-        default :
-            break;
-
-        case 1 : /* Set from env vars */
-            if (getenv("LPDEST"))
-              _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("LPDEST environment variable names default destination that does not exist."), 1);
-	    else if (getenv("PRINTER"))
-              _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("PRINTER environment variable names default destination that does not exist."), 1);
-	    else
-              _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("No default destination."), 1);
-            break;
-
-        case 2 : /* Set from ~/.cups/lpoptions */
-	    _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("~/.cups/lpoptions file names default destination that does not exist."), 1);
-            break;
-
-        case 3 : /* Set from /etc/cups/lpoptions */
-	    _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("/etc/cups/lpoptions file names default destination that does not exist."), 1);
-            break;
-
-        case 4 : /* Set from server */
-	    _cupsSetError(IPP_STATUS_ERROR_NOT_FOUND, _("No default destination."), 1);
-            break;
-      }
-
-      return (NULL);
-    }
   }
 
   DEBUG_printf(("1cupsGetNamedDest: Got dest=%p", (void *)dest));
@@ -1897,7 +1898,11 @@ cupsGetNamedDest(http_t     *http,	/* I - Connection to server or @code CUPS_HTT
 
   if (cg->home)
   {
+#if _WIN32
+    snprintf(filename, sizeof(filename), "%s/AppData/Local/cups/lpoptions", cg->home);
+#else
     snprintf(filename, sizeof(filename), "%s/.cups/lpoptions", cg->home);
+#endif // _WIN32
 
     cups_get_dests(filename, dest_name, instance, 0, 1, 1, &dest);
   }
@@ -2068,17 +2073,29 @@ cupsSetDests2(http_t      *http,	/* I - Connection to server or @code CUPS_HTTP_
 
   snprintf(filename, sizeof(filename), "%s/lpoptions", cg->cups_serverroot);
 
-  if (cg->home)
+  if (cg->home
+#ifndef _WIN32
+      && getuid() != 0
+#endif /* !_WIN32 */
+      )
   {
    /*
     * Create ~/.cups subdirectory...
     */
 
+#if _WIN32
+    snprintf(filename, sizeof(filename), "%s/AppData/Local/cups", cg->home);
+#else
     snprintf(filename, sizeof(filename), "%s/.cups", cg->home);
+#endif // _WIN32
     if (access(filename, 0))
       mkdir(filename, 0700);
 
+#if _WIN32
+    snprintf(filename, sizeof(filename), "%s/AppData/Local/cups/lpoptions", cg->home);
+#else
     snprintf(filename, sizeof(filename), "%s/.cups/lpoptions", cg->home);
+#endif // _WIN32
   }
 
  /*
@@ -2811,7 +2828,9 @@ cups_dnssd_get_device(
                   !strcmp(regtype, "_ipps._tcp") ? "IPPS" : "IPP",
                   replyDomain));
 
-    device            = calloc(sizeof(_cups_dnssd_device_t), 1);
+    if ((device = calloc(sizeof(_cups_dnssd_device_t), 1)) == NULL)
+      return (NULL);
+
     device->dest.name = _cupsStrAlloc(name);
     device->domain    = _cupsStrAlloc(replyDomain);
     device->regtype   = _cupsStrAlloc(regtype);
@@ -3378,7 +3397,7 @@ cups_enum_dests(
   cups_dest_cb_t cb,                    /* I - Callback function */
   void           *user_data)            /* I - User data */
 {
-  int           i, j,			/* Looping vars */
+  int           i, j, k,		/* Looping vars */
                 num_dests;              /* Number of destinations */
   cups_dest_t   *dests = NULL,          /* Destinations */
                 *dest;			/* Current destination */
@@ -3445,7 +3464,11 @@ cups_enum_dests(
 
   if (cg->home)
   {
+#if _WIN32
+    snprintf(filename, sizeof(filename), "%s/AppData/Local/cups/lpoptions", cg->home);
+#else
     snprintf(filename, sizeof(filename), "%s/.cups/lpoptions", cg->home);
+#endif // _WIN32
 
     data.num_dests = cups_get_dests(filename, NULL, NULL, 1, user_default != NULL, data.num_dests, &data.dests);
   }
@@ -3523,17 +3546,34 @@ cups_enum_dests(
       const char	*device_uri;	/* Device URI */
 #endif /* HAVE_DNSSD */
 
-      if ((user_dest = cupsGetDest(dest->name, dest->instance, data.num_dests, data.dests)) != NULL)
+      if ((user_dest = cupsGetDest(dest->name, NULL, data.num_dests, data.dests)) != NULL)
       {
        /*
-        * Apply user defaults to this destination...
+        * Apply user defaults to this destination for all instances...
         */
 
-        for (j = user_dest->num_options, option = user_dest->options; j > 0; j --, option ++)
-          dest->num_options = cupsAddOption(option->name, option->value, dest->num_options, &dest->options);
-      }
+        for (j = user_dest - data.dests; j < data.num_dests; j ++, user_dest ++)
+        {
+          if (_cups_strcasecmp(user_dest->name, dest->name))
+          {
+            j = data.num_dests;
+            break;
+          }
 
-      if (!(*cb)(user_data, i > 1 ? CUPS_DEST_FLAGS_MORE : CUPS_DEST_FLAGS_NONE, dest))
+	  for (k = dest->num_options, option = dest->options; k > 0; k --, option ++)
+	  {
+	    if (!cupsGetOption(option->name, user_dest->num_options, user_dest->options))
+	      user_dest->num_options = cupsAddOption(option->name, option->value, user_dest->num_options, &user_dest->options);
+	  }
+
+          if (!(*cb)(user_data, i > 1 ? CUPS_DEST_FLAGS_MORE : CUPS_DEST_FLAGS_NONE, user_dest))
+            break;
+        }
+
+        if (j < data.num_dests)
+          break;
+      }
+      else if (!(*cb)(user_data, i > 1 ? CUPS_DEST_FLAGS_MORE : CUPS_DEST_FLAGS_NONE, dest))
         break;
 
 #ifdef HAVE_DNSSD
@@ -3597,6 +3637,7 @@ cups_enum_dests(
     DEBUG_puts("1cups_enum_dests: Unable to create service browser, returning 0.");
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3610,6 +3651,7 @@ cups_enum_dests(
     DNSServiceRefDeallocate(data.main_ref);
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3622,6 +3664,7 @@ cups_enum_dests(
     DNSServiceRefDeallocate(data.main_ref);
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3633,6 +3676,7 @@ cups_enum_dests(
     DEBUG_puts("1cups_enum_dests: Unable to create Avahi poll, returning 0.");
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3648,6 +3692,7 @@ cups_enum_dests(
     avahi_simple_poll_free(data.simple_poll);
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3661,6 +3706,7 @@ cups_enum_dests(
     avahi_simple_poll_free(data.simple_poll);
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3676,6 +3722,7 @@ cups_enum_dests(
     avahi_simple_poll_free(data.simple_poll);
 
     cupsFreeDests(data.num_dests, data.dests);
+    cupsArrayDelete(data.devices);
 
     return (0);
   }
@@ -3796,25 +3843,48 @@ cups_enum_dests(
 	  if ((user_dest = cupsGetDest(dest->name, dest->instance, data.num_dests, data.dests)) != NULL)
 	  {
 	   /*
-	    * Apply user defaults to this destination...
+	    * Apply user defaults to this destination for all instances...
 	    */
 
-	    for (j = user_dest->num_options, option = user_dest->options; j > 0; j --, option ++)
-	      dest->num_options = cupsAddOption(option->name, option->value, dest->num_options, &dest->options);
-	  }
+	    for (j = user_dest - data.dests; j < data.num_dests; j ++, user_dest ++)
+	    {
+	      if (_cups_strcasecmp(user_dest->name, dest->name))
+	      {
+		j = data.num_dests;
+		break;
+	      }
 
-          if (!strcasecmp(dest->name, data.def_name) && !data.def_instance)
+	      for (k = dest->num_options, option = dest->options; k > 0; k --, option ++)
+	      {
+	        if (!cupsGetOption(option->name, user_dest->num_options, user_dest->options))
+		  user_dest->num_options = cupsAddOption(option->name, option->value, user_dest->num_options, &user_dest->options);
+	      }
+
+	      if (!(*cb)(user_data, CUPS_DEST_FLAGS_NONE, user_dest))
+		break;
+	    }
+
+	    if (j < data.num_dests)
+	    {
+	      remaining = -1;
+	      break;
+	    }
+	  }
+	  else
 	  {
-	    DEBUG_printf(("1cups_enum_dests: Setting is_default on discovered \"%s\".", dest->name));
-            dest->is_default = 1;
-	  }
+	    if (!strcasecmp(dest->name, data.def_name) && !data.def_instance)
+	    {
+	      DEBUG_printf(("1cups_enum_dests: Setting is_default on discovered \"%s\".", dest->name));
+	      dest->is_default = 1;
+	    }
 
-          DEBUG_printf(("1cups_enum_dests: Add callback for \"%s\".", device->dest.name));
-          if (!(*cb)(user_data, CUPS_DEST_FLAGS_NONE, dest))
-          {
-            remaining = -1;
-            break;
-          }
+	    DEBUG_printf(("1cups_enum_dests: Add callback for \"%s\".", device->dest.name));
+	    if (!(*cb)(user_data, CUPS_DEST_FLAGS_NONE, dest))
+	    {
+	      remaining = -1;
+	      break;
+	    }
+	  }
         }
 
         device->state = _CUPS_DNSSD_ACTIVE;
@@ -3926,7 +3996,7 @@ cups_find_dest(const char  *name,	/* I - Destination name */
     else
     {
      /*
-      * Start wih previous on left side...
+      * Start with previous on left side...
       */
 
       left  = prev;
@@ -4185,7 +4255,7 @@ cups_get_dests(
 	* Out of memory!
 	*/
 
-        DEBUG_puts("9cups_get_dests: Out of memory!");
+        DEBUG_puts("9cups_get_dests: Could not find destination after adding, must be out of memory.");
         break;
       }
     }

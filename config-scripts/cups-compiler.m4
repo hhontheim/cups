@@ -1,7 +1,7 @@
 dnl
 dnl Compiler tests for CUPS.
 dnl
-dnl Copyright © 2021 by OpenPrinting.
+dnl Copyright © 2021-2022 by OpenPrinting.
 dnl Copyright © 2007-2018 by Apple Inc.
 dnl Copyright © 1997-2007 by Easy Software Products, all rights reserved.
 dnl
@@ -123,22 +123,26 @@ AS_IF([test -n "$GCC"], [
 	OPTIM="-fPIC $OPTIM"
     ])
 
-    # The -fstack-protector option is available with some versions of
-    # GCC and adds "stack canaries" which detect when the return address
-    # has been overwritten, preventing many types of exploit attacks.
-    AC_MSG_CHECKING([whether compiler supports -fstack-protector])
+    # The -fstack-protector-strong and -fstack-protector options are available
+    # with some versions of GCC and adds "stack canaries" which detect
+    # when the return address has been overwritten, preventing many types of exploit attacks.
+    # First check for -fstack-protector-strong, then for -fstack-protector...
+    AC_MSG_CHECKING([whether compiler supports -fstack-protector-strong])
     OLDCFLAGS="$CFLAGS"
-    CFLAGS="$CFLAGS -fstack-protector"
+    CFLAGS="$CFLAGS -fstack-protector-strong"
     AC_LINK_IFELSE([AC_LANG_PROGRAM()], [
-	AS_IF([test "x$LSB_BUILD" = xy], [
-	    # Can't use stack-protector with LSB binaries...
-	    OPTIM="$OPTIM -fno-stack-protector"
-	], [
-	    OPTIM="$OPTIM -fstack-protector"
-	])
+	OPTIM="$OPTIM -fstack-protector-strong"
 	AC_MSG_RESULT([yes])
     ], [
 	AC_MSG_RESULT([no])
+	AC_MSG_CHECKING([whether compiler supports -fstack-protector])
+	CFLAGS="$OLDCFLAGS -fstack-protector"
+	AC_LINK_IFELSE([AC_LANG_PROGRAM()], [
+	    OPTIM="$OPTIM -fstack-protector"
+	    AC_MSG_RESULT([yes])
+	], [
+	    AC_MSG_RESULT([no])
+	])
     ])
     CFLAGS="$OLDCFLAGS"
 
@@ -152,7 +156,7 @@ AS_IF([test -n "$GCC"], [
 	OLDCFLAGS="$CFLAGS"
 	AS_CASE(["$host_os_name"], [darwin*], [
 	    CFLAGS="$CFLAGS -fPIE -Wl,-pie"
-	    AC_COMPILE_IFELSE([AC_LANG_PROGRAM()], [
+	    AC_LINK_IFELSE([AC_LANG_PROGRAM()], [
 		PIEFLAGS="-fPIE -Wl,-pie"
 		AC_MSG_RESULT([yes])
 	    ], [
@@ -208,9 +212,9 @@ AS_IF([test -n "$GCC"], [
     ], [*], [
 	# Running some other operating system; inform the user
 	# they should contribute the necessary options via
-	# Github...
+	# GitHub...
 	echo "Building CUPS with default compiler optimizations."
-	echo "Contact the OpenPrinting CUPS developers on Github with the uname and compiler"
+	echo "Contact the OpenPrinting CUPS developers on GitHub with the uname and compiler"
 	echo "options needed for your platform, or set the CFLAGS and LDFLAGS environment"
 	echo "variables before running configure."
 	echo ""

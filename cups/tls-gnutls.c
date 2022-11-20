@@ -1,7 +1,7 @@
 /*
  * TLS support code for CUPS using GNU TLS.
  *
- * Copyright © 2020 by OpenPrinting
+ * Copyright © 2020-2022 by OpenPrinting
  * Copyright © 2007-2019 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -167,7 +167,7 @@ cupsMakeServerCredentials(
   gnutls_x509_crt_set_key(crt, key);
   gnutls_x509_crt_set_serial(crt, serial, sizeof(serial));
   gnutls_x509_crt_set_activation_time(crt, curtime);
-  gnutls_x509_crt_set_expiration_time(crt, curtime + 10 * 365 * 86400);
+  gnutls_x509_crt_set_expiration_time(crt, expiration_date);
   gnutls_x509_crt_set_ca_status(crt, 0);
   gnutls_x509_crt_set_subject_alt_name(crt, GNUTLS_SAN_DNSNAME, common_name, (unsigned)strlen(common_name), GNUTLS_FSAN_SET);
   if (!strchr(common_name, '.'))
@@ -660,7 +660,7 @@ httpCredentialsString(
   if (!buffer)
     return (0);
 
-  if (buffer && bufsize > 0)
+  if (bufsize > 0)
     *buffer = '\0';
 
   if ((first = (http_credential_t *)cupsArrayFirst(credentials)) != NULL &&
@@ -1120,7 +1120,7 @@ http_gnutls_read(
   ssize_t	bytes;			/* Bytes read */
 
 
-  DEBUG_printf(("6http_gnutls_read(ptr=%p, data=%p, length=%d)", ptr, data, (int)length));
+  DEBUG_printf(("5http_gnutls_read(ptr=%p, data=%p, length=%d)", ptr, data, (int)length));
 
   http = (http_t *)ptr;
 
@@ -1141,7 +1141,7 @@ http_gnutls_read(
   }
 
   bytes = recv(http->fd, data, length, 0);
-  DEBUG_printf(("6http_gnutls_read: bytes=%d", (int)bytes));
+  DEBUG_printf(("5http_gnutls_read: bytes=%d", (int)bytes));
   return (bytes);
 }
 
@@ -1159,10 +1159,10 @@ http_gnutls_write(
   ssize_t bytes;			/* Bytes written */
 
 
-  DEBUG_printf(("6http_gnutls_write(ptr=%p, data=%p, length=%d)", ptr, data,
+  DEBUG_printf(("5http_gnutls_write(ptr=%p, data=%p, length=%d)", ptr, data,
                 (int)length));
   bytes = send(((http_t *)ptr)->fd, data, length, 0);
-  DEBUG_printf(("http_gnutls_write: bytes=%d", (int)bytes));
+  DEBUG_printf(("5http_gnutls_write: bytes=%d", (int)bytes));
 
   return (bytes);
 }
@@ -1368,6 +1368,8 @@ _httpTLSStart(http_t *http)		/* I - Connection to server */
 
     char	crtfile[1024],		/* Certificate file */
 		keyfile[1024];		/* Private key file */
+    const char	*cn,			// Common name to lookup
+		*cnptr;			// Pointer into common name
     int		have_creds = 0;		/* Have credentials? */
 
     if (http->fields[HTTP_FIELD_HOST])
@@ -1405,14 +1407,21 @@ _httpTLSStart(http_t *http)		/* I - Connection to server */
     if (isdigit(hostname[0] & 255) || hostname[0] == '[')
       hostname[0] = '\0';		/* Don't allow numeric addresses */
 
+    _cupsMutexLock(&tls_mutex);
+
     if (hostname[0])
+      cn = hostname;
+    else
+      cn = tls_common_name;
+
+    if (cn)
     {
      /*
       * First look in the CUPS keystore...
       */
 
-      http_gnutls_make_path(crtfile, sizeof(crtfile), tls_keypath, hostname, "crt");
-      http_gnutls_make_path(keyfile, sizeof(keyfile), tls_keypath, hostname, "key");
+      http_gnutls_make_path(crtfile, sizeof(crtfile), tls_keypath, cn, "crt");
+      http_gnutls_make_path(keyfile, sizeof(keyfile), tls_keypath, cn, "key");
 
       if (access(crtfile, R_OK) || access(keyfile, R_OK))
       {
@@ -1422,67 +1431,20 @@ _httpTLSStart(http_t *http)		/* I - Connection to server */
 
         char cacrtfile[1024], cakeyfile[1024];	/* CA cert files */
 
-        snprintf(cacrtfile, sizeof(cacrtfile), "/etc/letsencrypt/live/%s/fullchain.pem", hostname);
-        snprintf(cakeyfile, sizeof(cakeyfile), "/etc/letsencrypt/live/%s/privkey.pem", hostname);
+        snprintf(cacrtfile, sizeof(cacrtfile), "/etc/letsencrypt/live/%s/fullchain.pem", cn);
+        snprintf(cakeyfile, sizeof(cakeyfile), "/etc/letsencrypt/live/%s/privkey.pem", cn);
 
-        if ((access(cacrtfile, R_OK) || access(cakeyfile, R_OK)) && (hostptr = strchr(hostname, '.')) != NULL)
+        if ((access(cacrtfile, R_OK) || access(cakeyfile, R_OK)) && (cnptr = strchr(cn, '.')) != NULL)
         {
          /*
           * Try just domain name...
           */
 
-          hostptr ++;
-          if (strchr(hostptr, '.'))
+          cnptr ++;
+          if (strchr(cnptr, '.'))
           {
-            snprintf(cacrtfile, sizeof(cacrtfile), "/etc/letsencrypt/live/%s/fullchain.pem", hostptr);
-            snprintf(cakeyfile, sizeof(cakeyfile), "/etc/letsencrypt/live/%s/privkey.pem", hostptr);
-          }
-        }
-
-        if (!access(cacrtfile, R_OK) && !access(cakeyfile, R_OK))
-        {
-         /*
-          * Use the CA certs...
-          */
-
-          strlcpy(crtfile, cacrtfile, sizeof(crtfile));
-          strlcpy(keyfile, cakeyfile, sizeof(keyfile));
-        }
-      }
-
-      have_creds = !access(crtfile, R_OK) && !access(keyfile, R_OK);
-    }
-    else if (tls_common_name)
-    {
-     /*
-      * First look in the CUPS keystore...
-      */
-
-      http_gnutls_make_path(crtfile, sizeof(crtfile), tls_keypath, tls_common_name, "crt");
-      http_gnutls_make_path(keyfile, sizeof(keyfile), tls_keypath, tls_common_name, "key");
-
-      if (access(crtfile, R_OK) || access(keyfile, R_OK))
-      {
-       /*
-        * No CUPS-managed certs, look for CA certs...
-        */
-
-        char cacrtfile[1024], cakeyfile[1024];	/* CA cert files */
-
-        snprintf(cacrtfile, sizeof(cacrtfile), "/etc/letsencrypt/live/%s/fullchain.pem", tls_common_name);
-        snprintf(cakeyfile, sizeof(cakeyfile), "/etc/letsencrypt/live/%s/privkey.pem", tls_common_name);
-
-        if ((access(cacrtfile, R_OK) || access(cakeyfile, R_OK)) && (hostptr = strchr(tls_common_name, '.')) != NULL)
-        {
-         /*
-          * Try just domain name...
-          */
-
-          hostptr ++;
-          if (strchr(hostptr, '.'))
-          {
-            snprintf(cacrtfile, sizeof(cacrtfile), "/etc/letsencrypt/live/%s/fullchain.pem", hostptr);
-            snprintf(cakeyfile, sizeof(cakeyfile), "/etc/letsencrypt/live/%s/privkey.pem", hostptr);
+            snprintf(cacrtfile, sizeof(cacrtfile), "/etc/letsencrypt/live/%s/fullchain.pem", cnptr);
+            snprintf(cakeyfile, sizeof(cakeyfile), "/etc/letsencrypt/live/%s/privkey.pem", cnptr);
           }
         }
 
@@ -1500,16 +1462,17 @@ _httpTLSStart(http_t *http)		/* I - Connection to server */
       have_creds = !access(crtfile, R_OK) && !access(keyfile, R_OK);
     }
 
-    if (!have_creds && tls_auto_create && (hostname[0] || tls_common_name))
+    if (!have_creds && tls_auto_create && cn)
     {
-      DEBUG_printf(("4_httpTLSStart: Auto-create credentials for \"%s\".", hostname[0] ? hostname : tls_common_name));
+      DEBUG_printf(("4_httpTLSStart: Auto-create credentials for \"%s\".", cn));
 
-      if (!cupsMakeServerCredentials(tls_keypath, hostname[0] ? hostname : tls_common_name, 0, NULL, time(NULL) + 365 * 86400))
+      if (!cupsMakeServerCredentials(tls_keypath, cn, 0, NULL, time(NULL) + 3650 * 86400))
       {
 	DEBUG_puts("4_httpTLSStart: cupsMakeServerCredentials failed.");
 	http->error  = errno = EINVAL;
 	http->status = HTTP_STATUS_ERROR;
 	_cupsSetError(IPP_STATUS_ERROR_INTERNAL, _("Unable to create server credentials."), 1);
+	_cupsMutexUnlock(&tls_mutex);
 
 	return (-1);
       }
@@ -1517,8 +1480,9 @@ _httpTLSStart(http_t *http)		/* I - Connection to server */
 
     DEBUG_printf(("4_httpTLSStart: Using certificate \"%s\" and private key \"%s\".", crtfile, keyfile));
 
-    if (!status)
-      status = gnutls_certificate_set_x509_key_file(*credentials, crtfile, keyfile, GNUTLS_X509_FMT_PEM);
+    _cupsMutexUnlock(&tls_mutex);
+
+    status = gnutls_certificate_set_x509_key_file(*credentials, crtfile, keyfile, GNUTLS_X509_FMT_PEM);
   }
 
   if (!status)
@@ -1668,7 +1632,7 @@ _httpTLSStop(http_t *http)		/* I - Connection to server */
   int	error;				/* Error code */
 
 
-  error = gnutls_bye(http->tls, http->mode == _HTTP_MODE_CLIENT ? GNUTLS_SHUT_RDWR : GNUTLS_SHUT_WR);
+  error = gnutls_bye(http->tls, GNUTLS_SHUT_WR);
   if (error != GNUTLS_E_SUCCESS)
     _cupsSetError(IPP_STATUS_ERROR_INTERNAL, gnutls_strerror(errno), 0);
 
@@ -1696,7 +1660,7 @@ _httpTLSWrite(http_t     *http,		/* I - Connection to server */
   ssize_t	result;			/* Return value */
 
 
-  DEBUG_printf(("2http_write_ssl(http=%p, buf=%p, len=%d)", http, buf, len));
+  DEBUG_printf(("5_httpTLSWrite(http=%p, buf=%p, len=%d)", http, buf, len));
 
   result = gnutls_record_send(http->tls, buf, (size_t)len);
 
@@ -1724,7 +1688,7 @@ _httpTLSWrite(http_t     *http,		/* I - Connection to server */
     result = -1;
   }
 
-  DEBUG_printf(("3http_write_ssl: Returning %d.", (int)result));
+  DEBUG_printf(("5_httpTLSWrite: Returning %d.", (int)result));
 
   return ((int)result);
 }

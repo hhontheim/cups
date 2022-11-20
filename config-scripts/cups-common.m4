@@ -1,7 +1,7 @@
 dnl
 dnl Common configuration stuff for CUPS.
 dnl
-dnl Copyright © 2021 by OpenPrinting.
+dnl Copyright © 2021-2022 by OpenPrinting.
 dnl Copyright © 2007-2019 by Apple Inc.
 dnl Copyright © 1997-2007 by Easy Software Products, all rights reserved.
 dnl
@@ -338,8 +338,8 @@ AS_IF([test "x$enable_dbus" != xno -a "x$PKGCONFIG" != x -a "x$host_os_name" != 
 	AC_CHECK_FUNC([dbus_message_iter_init_append], [
 	    AC_DEFINE([HAVE_DBUS_MESSAGE_ITER_INIT_APPEND], [1], [Have dbus_message_iter_init_append function?])
 	])
-	AC_CHECK_FUNC([dbus_threads_init], [
-	    AC_DEFINE([HAVE_DBUS_THREADS_INIT], [1], [Have dbus_threads_init function?])
+	AC_CHECK_FUNC([dbus_threads_init_default], [
+	    AC_DEFINE([HAVE_DBUS_THREADS_INIT], [1], [Have dbus_threads_init_default function?])
 	])
 	LIBS="$SAVELIBS"
 	AS_IF([test -d /etc/dbus-1 -a "x$DBUSDIR" = x], [

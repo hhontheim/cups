@@ -1,8 +1,8 @@
 /*
  * IPP routines for the CUPS scheduler.
  *
- * Copyright © 2020-2021 by OpenPrinting
- * Copyright © 2007-2019 by Apple Inc.
+ * Copyright © 2020-2022 by OpenPrinting
+ * Copyright © 2007-2021 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
  * This file contains Kerberos support code, copyright 2006 by
@@ -73,6 +73,7 @@ static void	copy_subscription_attrs(cupsd_client_t *con,
 					cups_array_t *ra,
 					cups_array_t *exclude);
 static void	create_job(cupsd_client_t *con, ipp_attribute_t *uri);
+static void	*create_local_bg_thread(cupsd_printer_t *printer);
 static void	create_local_printer(cupsd_client_t *con);
 static cups_array_t *create_requested_array(ipp_t *request);
 static void	create_subscriptions(cupsd_client_t *con, ipp_attribute_t *uri);
@@ -2206,7 +2207,7 @@ add_printer(cupsd_client_t  *con,	/* I - Client connection */
             ipp_attribute_t *uri)	/* I - URI of printer */
 {
   http_status_t	status;			/* Policy status */
-  int		i;			/* Looping var */
+  int		i = 0;			/* Looping var */
   char		scheme[HTTP_MAX_URI],	/* Method portion of URI */
 		username[HTTP_MAX_URI],	/* Username portion of URI */
 		host[HTTP_MAX_URI],	/* Host portion of URI */
@@ -2338,6 +2339,18 @@ add_printer(cupsd_client_t  *con,	/* I - Client connection */
     cupsdSetString(&printer->info, attr->values[0].string.text);
 
   set_device_uri = 0;
+
+  if ((attr = ippFindAttribute(con->request, "ColorModel", IPP_TAG_NAME)) != NULL)
+  {
+    const char * keyword = NULL;
+
+    if (!strcmp(attr->values[0].string.text, "FastGray") || !strcmp(attr->values[0].string.text, "Gray") || !strcmp(attr->values[0].string.text, "DeviceGray"))
+      keyword = "monochrome";
+    else
+      keyword = "color";
+
+    printer->num_options = cupsAddOption("print-color-mode", keyword, printer->num_options, &printer->options);
+  }
 
   if ((attr = ippFindAttribute(con->request, "device-uri",
                                IPP_TAG_URI)) != NULL)
@@ -2692,7 +2705,22 @@ add_printer(cupsd_client_t  *con,	/* I - Client connection */
     need_restart_job = 1;
     changed_driver   = 1;
 
-    if (!strcmp(ppd_name, "raw"))
+    if (!strcmp(ppd_name, "everywhere"))
+    {
+      // Create IPP Everywhere PPD...
+      if (!printer->device_uri || (strncmp(printer->device_uri, "dnssd://", 8) && strncmp(printer->device_uri, "ipp://", 6) && strncmp(printer->device_uri, "ipps://", 7) && strncmp(printer->device_uri, "ippusb://", 9)))
+      {
+	send_ipp_status(con, IPP_INTERNAL_ERROR, _("IPP Everywhere driver requires an IPP connection."));
+	if (!modify)
+	  cupsdDeletePrinter(printer, 0);
+
+	return;
+      }
+
+      // Run a background thread to create the PPD...
+      _cupsThreadCreate((_cups_thread_func_t)create_local_bg_thread, printer);
+    }
+    else if (!strcmp(ppd_name, "raw"))
     {
      /*
       * Raw driver, remove any existing PPD file.
@@ -2719,7 +2747,6 @@ add_printer(cupsd_client_t  *con,	/* I - Client connection */
 
       if (copy_model(con, ppd_name, dstfile))
       {
-        send_ipp_status(con, IPP_INTERNAL_ERROR, _("Unable to copy PPD file."));
 	if (!modify)
 	  cupsdDeletePrinter(printer, 0);
 
@@ -2919,8 +2946,20 @@ apply_printer_defaults(
        i --, option ++)
     if (!ippFindAttribute(job->attrs, option->name, IPP_TAG_ZERO))
     {
+      if (!strcmp(option->name, "media") && ippFindAttribute(job->attrs, "PageSize", IPP_TAG_NAME))
+        continue;                     /* Don't override PageSize */
+
+      if (!strcmp(option->name, "output-bin") && ippFindAttribute(job->attrs, "OutputBin", IPP_TAG_NAME))
+        continue;                     /* Don't override OutputBin */
+
       if (!strcmp(option->name, "print-quality") && ippFindAttribute(job->attrs, "cupsPrintQuality", IPP_TAG_NAME))
         continue;                     /* Don't override cupsPrintQuality */
+
+      if (!strcmp(option->name, "print-color-mode") && ippFindAttribute(job->attrs, "ColorModel", IPP_TAG_NAME))
+        continue;                     /* Don't override ColorModel */
+
+      if (!strcmp(option->name, "sides") && ippFindAttribute(job->attrs, "Duplex", IPP_TAG_NAME))
+        continue;                     /* Don't override Duplex */
 
       cupsdLogJob(job, CUPSD_LOG_DEBUG, "Adding default %s=%s", option->name, option->value);
 
@@ -4468,9 +4507,15 @@ copy_model(cupsd_client_t *con,		/* I - Client connection */
 
   snprintf(buffer, sizeof(buffer), "%s/daemon/cups-driverd", ServerBin);
   snprintf(tempfile, sizeof(tempfile), "%s/%d.ppd", TempDir, con->number);
-  tempfd = open(tempfile, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-  if (tempfd < 0 || cupsdOpenPipe(temppipe))
+  if ((tempfd = open(tempfile, O_WRONLY | O_CREAT | O_TRUNC, 0600)) < 0)
     return (-1);
+  if (cupsdOpenPipe(temppipe))
+  {
+    close(tempfd);
+    unlink(tempfile);
+
+    return (-1);
+  }
 
   cupsdLogMessage(CUPSD_LOG_DEBUG,
                   "copy_model: Running \"cups-driverd cat %s\"...", from);
@@ -4478,6 +4523,7 @@ copy_model(cupsd_client_t *con,		/* I - Client connection */
   if (!cupsdStartProcess(buffer, argv, envp, -1, temppipe[1], CGIPipes[1],
                          -1, -1, 0, DefaultProfile, NULL, &temppid))
   {
+    send_ipp_status(con, IPP_INTERNAL_ERROR, _("Unable to run cups-driverd: %s"), strerror(errno));
     close(tempfd);
     unlink(tempfile);
 
@@ -4557,6 +4603,7 @@ copy_model(cupsd_client_t *con,		/* I - Client connection */
     */
 
     cupsdLogMessage(CUPSD_LOG_ERROR, "copy_model: empty PPD file");
+    send_ipp_status(con, IPP_INTERNAL_ERROR, _("cups-driverd failed to get PPD file - see error_log for details."));
     unlink(tempfile);
     return (-1);
   }
@@ -4650,6 +4697,7 @@ copy_model(cupsd_client_t *con,		/* I - Client connection */
 
   if ((dst = cupsdCreateConfFile(to, ConfigFilePerm)) == NULL)
   {
+    send_ipp_status(con, IPP_INTERNAL_ERROR, _("Unable to save PPD file: %s"), strerror(errno));
     cupsFreeOptions(num_defaults, defaults);
     cupsFileClose(src);
     unlink(tempfile);
@@ -4703,7 +4751,15 @@ copy_model(cupsd_client_t *con,		/* I - Client connection */
 
   unlink(tempfile);
 
-  return (cupsdCloseCreatedConfFile(dst, to));
+  if (cupsdCloseCreatedConfFile(dst, to))
+  {
+    send_ipp_status(con, IPP_INTERNAL_ERROR, _("Unable to commit PPD file: %s"), strerror(errno));
+    return (-1);
+  }
+  else
+  {
+    return (0);
+  }
 }
 
 
@@ -5239,6 +5295,7 @@ create_local_bg_thread(
 		userpass[256],		/* User:pass */
 		host[256],		/* Hostname */
 		resource[1024],		/* Resource path */
+		uri[1024],		/* Resolved URI, if needed */
 		line[1024];		/* Line from PPD */
   int		port;			/* Port number */
   http_encryption_t encryption;		/* Type of encryption to use */
@@ -5259,6 +5316,20 @@ create_local_bg_thread(
   */
 
   cupsdLogMessage(CUPSD_LOG_DEBUG, "%s: Generating PPD file from \"%s\"...", printer->name, printer->device_uri);
+
+
+  if (strstr(printer->device_uri, "._tcp"))
+  {
+    cupsdLogMessage(CUPSD_LOG_DEBUG2, "%s: Resolving mDNS URI \"%s\".", printer->name, printer->device_uri);
+
+    if (!_httpResolveURI(printer->device_uri, uri, sizeof(uri), _HTTP_RESOLVE_DEFAULT, NULL, NULL))
+    {
+      cupsdLogMessage(CUPSD_LOG_ERROR, "%s: Couldn't resolve mDNS URI \"%s\".", printer->name, printer->device_uri);
+      return (NULL);
+    }
+
+    cupsdSetString(&printer->device_uri, uri);
+  }
 
   if (httpSeparateURI(HTTP_URI_CODING_ALL, printer->device_uri, scheme, sizeof(scheme), userpass, sizeof(userpass), host, sizeof(host), &port, resource, sizeof(resource)) < HTTP_URI_STATUS_OK)
   {
@@ -5339,6 +5410,7 @@ create_local_bg_thread(
     if ((from = cupsFileOpen(fromppd, "r")) == NULL)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "%s: Unable to read generated PPD: %s", printer->name, strerror(errno));
+      ippDelete(response);
       return (NULL);
     }
 
@@ -5346,6 +5418,7 @@ create_local_bg_thread(
     if ((to = cupsdCreateConfFile(toppd, ConfigFilePerm)) == NULL)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "%s: Unable to create PPD for printer: %s", printer->name, strerror(errno));
+      ippDelete(response);
       cupsFileClose(from);
       return (NULL);
     }
@@ -5368,6 +5441,8 @@ create_local_bg_thread(
   }
   else
     cupsdLogMessage(CUPSD_LOG_ERROR, "%s: PPD creation failed: %s", printer->name, cupsLastErrorString());
+
+  ippDelete(response);
 
   return (NULL);
 }
@@ -5392,6 +5467,11 @@ create_local_printer(
 		*nameptr,		/* Pointer into name */
 		uri[1024];		/* printer-uri-supported value */
   const char	*ptr;			/* Pointer into attribute value */
+  char		scheme[HTTP_MAX_URI],	/* Scheme portion of URI */
+		userpass[HTTP_MAX_URI],	/* Username portion of URI */
+		host[HTTP_MAX_URI],	/* Host portion of URI */
+		resource[HTTP_MAX_URI];	/* Resource portion of URI */
+  int		port;			/* Port portion of URI */
 
 
  /*
@@ -5456,6 +5536,15 @@ create_local_printer(
     return;
   }
 
+  ptr = ippGetString(device_uri, 0, NULL);
+
+  if (!ptr || !ptr[0])
+  {
+    send_ipp_status(con, IPP_STATUS_ERROR_BAD_REQUEST, _("Attribute \"%s\" has empty value."), "device-uri");
+
+    return;
+  }
+
   printer_geo_location = ippFindAttribute(con->request, "printer-geo-location", IPP_TAG_URI);
   printer_info         = ippFindAttribute(con->request, "printer-info", IPP_TAG_TEXT);
   printer_location     = ippFindAttribute(con->request, "printer-location", IPP_TAG_TEXT);
@@ -5483,7 +5572,65 @@ create_local_printer(
   printer->shared    = 0;
   printer->temporary = 1;
 
-  cupsdSetDeviceURI(printer, ippGetString(device_uri, 0, NULL));
+ /*
+  * Check device URI if it has the same hostname as we have, if so, replace
+  * the hostname by localhost. This way we assure that local-only services
+  * like ipp-usb or Printer Applications always work.
+  *
+  * When comparing our hostname with the one in the device URI,
+  * consider names with or without trailing dot ('.') the same. Also
+  * compare case-insensitively.
+  */
+
+#ifdef HAVE_DNSSD
+  if (DNSSDHostName)
+    nameptr = DNSSDHostName;
+  else
+#endif
+  if (ServerName)
+    nameptr = ServerName;
+  else
+    nameptr = NULL;
+
+  if (nameptr)
+  {
+    int host_len,
+        server_name_len;
+
+    /* Get host name of device URI */
+    httpSeparateURI(HTTP_URI_CODING_ALL, ptr,
+		    scheme, sizeof(scheme), userpass, sizeof(userpass), host,
+		    sizeof(host), &port, resource, sizeof(resource));
+
+    /* Take trailing dot out of comparison */
+    host_len = strlen(host);
+    if (host_len > 1 && host[host_len - 1] == '.')
+      host_len --;
+
+    server_name_len = strlen(nameptr);
+    if (server_name_len > 1 && nameptr[server_name_len - 1] == '.')
+      server_name_len --;
+
+   /*
+    * If we have no DNSSDHostName but only a ServerName (if we are not
+    * sharing printers, Browsing = Off) the ServerName has no ".local"
+    * but the requested device URI has. Take this into account.
+    */
+
+    if (nameptr == ServerName && host_len >= 6 && (server_name_len < 6 || strcmp(nameptr + server_name_len - 6, ".local") != 0) && strcmp(host + host_len - 6, ".local") == 0)
+      host_len -= 6;
+
+    if (host_len == server_name_len && strncasecmp(host, nameptr, host_len) == 0)
+      ptr = "localhost";
+    else
+      ptr = host;
+
+    httpAssembleURI(HTTP_URI_CODING_ALL, uri, sizeof(uri), scheme, userpass,
+		    ptr, port, resource);
+    cupsdSetDeviceURI(printer, uri);
+  }
+  else
+    cupsdSetDeviceURI(printer, ptr);
 
   if (printer_geo_location)
     cupsdSetString(&printer->geo_location, ippGetString(printer_geo_location, 0, NULL));
@@ -6758,6 +6905,7 @@ get_jobs(cupsd_client_t  *con,		/* I - Client connection */
     {
       send_ipp_status(con, IPP_NOT_FOUND, _("Job #%d does not exist."),
                       job_ids->values[i].integer);
+      cupsArrayDelete(ra);
       return;
     }
 
@@ -8520,6 +8668,8 @@ print_job(cupsd_client_t  *con,		/* I - Client connection */
     strlcpy(type, "octet-stream", sizeof(type));
   }
 
+  _cupsRWLockRead(&MimeDatabase->lock);
+
   if (!strcmp(super, "application") && !strcmp(type, "octet-stream"))
   {
    /*
@@ -8544,6 +8694,8 @@ print_job(cupsd_client_t  *con,		/* I - Client connection */
   }
   else
     filetype = mimeType(MimeDatabase, super, type);
+
+  _cupsRWUnlock(&MimeDatabase->lock);
 
   if (filetype &&
       (!format ||
@@ -9357,11 +9509,10 @@ restart_job(cupsd_client_t  *con,	/* I - Client connection */
     cupsdLogJob(job, CUPSD_LOG_DEBUG,
 		"Restarted by \"%s\" with job-hold-until=%s.",
                 username, attr->values[0].string.text);
-    cupsdSetJobHoldUntil(job, attr->values[0].string.text, 0);
-
-    cupsdAddEvent(CUPSD_EVENT_JOB_CONFIG_CHANGED | CUPSD_EVENT_JOB_STATE,
-                  NULL, job, "Job restarted by user with job-hold-until=%s",
-		  attr->values[0].string.text);
+    cupsdSetJobHoldUntil(job, attr->values[0].string.text, 1);
+    cupsdSetJobState(job, IPP_JOB_HELD, CUPSD_JOB_DEFAULT,
+		     "Job restarted by user with job-hold-until=%s",
+		     attr->values[0].string.text);
   }
   else
   {
@@ -9765,6 +9916,8 @@ send_document(cupsd_client_t  *con,	/* I - Client connection */
     strlcpy(type, "octet-stream", sizeof(type));
   }
 
+  _cupsRWLockRead(&MimeDatabase->lock);
+
   if (!strcmp(super, "application") && !strcmp(type, "octet-stream"))
   {
    /*
@@ -9793,6 +9946,8 @@ send_document(cupsd_client_t  *con,	/* I - Client connection */
   }
   else
     filetype = mimeType(MimeDatabase, super, type);
+
+  _cupsRWUnlock(&MimeDatabase->lock);
 
   if (filetype)
   {
@@ -10066,7 +10221,7 @@ send_ipp_status(cupsd_client_t *con,	/* I - Client connection */
 	        ...)			/* I - Additional args as needed */
 {
   va_list	ap;			/* Pointer to additional args */
-  char		formatted[1024];	/* Formatted errror message */
+  char		formatted[1024];	/* Formatted error message */
 
 
   va_start(ap, message);
@@ -11283,6 +11438,8 @@ validate_job(cupsd_client_t  *con,	/* I - Client connection */
       return;
     }
 
+    _cupsRWLockRead(&MimeDatabase->lock);
+
     if ((strcmp(super, "application") || strcmp(type, "octet-stream")) &&
 	!mimeType(MimeDatabase, super, type))
     {
@@ -11293,8 +11450,13 @@ validate_job(cupsd_client_t  *con,	/* I - Client connection */
 		      format->values[0].string.text);
       ippAddString(con->response, IPP_TAG_UNSUPPORTED_GROUP, IPP_TAG_MIMETYPE,
                    "document-format", NULL, format->values[0].string.text);
+
+      _cupsRWUnlock(&MimeDatabase->lock);
+
       return;
     }
+
+    _cupsRWUnlock(&MimeDatabase->lock);
   }
 
  /*

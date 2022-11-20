@@ -1,7 +1,7 @@
 #
 # Backend makefile for CUPS.
 #
-# Copyright © 2021 by OpenPrinting.
+# Copyright © 2021-2022 by OpenPrinting.
 # Copyright © 2007-2019 by Apple Inc.
 # Copyright © 1997-2007 by Easy Software Products, all rights reserved.
 #
@@ -20,7 +20,7 @@ include ../Makedefs
 # UBACKENDS are installed mode 0755 so cupsd will run them as an unprivileged
 # user...
 #
-# See http://www.cups.org/doc/api-filter.html for more info...
+# See <http://openprinting.github.io/cups/doc/api-filter.html> for more info...
 RBACKENDS =	\
 		ipp \
 		lpd \

@@ -1,16 +1,20 @@
-OpenPrinting CUPS v2.4.0
+OpenPrinting CUPS v2.4.2
 ========================
 
 ![Version](https://img.shields.io/github/v/release/openprinting/cups?include_prereleases)
 ![Apache 2.0](https://img.shields.io/github/license/openprinting/cups)
-![Build and Test](https://github.com/OpenPrinting/cups/workflows/Build%20and%20Test/badge.svg)
+[![Build and Test](https://github.com/OpenPrinting/cups/workflows/Build%20and%20Test/badge.svg)](https://github.com/OpenPrinting/cups/actions/workflows/build.yml)
+[![Coverity Scan](https://img.shields.io/coverity/scan/23806)](https://scan.coverity.com/projects/openprinting-cups)
+[![Codacy Badge](https://app.codacy.com/project/badge/Grade/4ea68dc02692436b82541b6f232eba66)](https://www.codacy.com/gh/OpenPrinting/cups/dashboard?utm_source=github.com&amp;utm_medium=referral&amp;utm_content=OpenPrinting/cups&amp;utm_campaign=Badge_Grade)
+[![LGTM Grade](https://img.shields.io/lgtm/grade/cpp/github/OpenPrinting/cups)](https://lgtm.com/projects/g/OpenPrinting/cups/?mode=list)
 
 
 Introduction
 ------------
 
-OpenPrinting CUPS is a standards-based, open source printing system for Linux®
-and other Unix®-like operating systems.  CUPS supports printing to:
+OpenPrinting CUPS is the most current version of CUPS, a standards-based, open
+source printing system for Linux® and other Unix®-like operating systems.  CUPS
+supports printing to:
 
 - [AirPrint™][1] and [IPP Everywhere™][2] printers,
 - Network and local (USB) printers with Printer Applications, and
@@ -25,6 +29,8 @@ CUPS is licensed under the Apache License Version 2.0 with an exception to allow
 linking against GNU GPL2-only software.  See the files `LICENSE` and `NOTICE`
 for more information.
 
+> Note: Apple maintains a separate repository for the CUPS that ships with macOS
+> and iOS at <https://github.com/apple/cups>.
 
 [1]: https://support.apple.com/en-us/HT201311
 [2]: https://www.pwg.org/ipp/everywhere.html
@@ -157,7 +163,7 @@ This will prevent the filters from misinterpreting your print file.
 Legal Stuff
 -----------
 
-Copyright © 2020-2021 by OpenPrinting
+Copyright © 2020-2022 by OpenPrinting
 
 Copyright © 2007-2020 by Apple Inc.
 

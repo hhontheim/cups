@@ -1,7 +1,7 @@
 /*
  * Main loop for the CUPS scheduler.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2019 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -233,7 +233,6 @@ main(int  argc,				/* I - Number of command-line args */
 
           case 'h' : /* Show usage/help */
 	      usage(0);
-	      break;
 
           case 'l' : /* Started by launchd/systemd/upstart... */
 #ifdef HAVE_ONDEMAND
@@ -313,7 +312,6 @@ main(int  argc,				/* I - Number of command-line args */
               _cupsLangPrintf(stderr, _("cupsd: Unknown option \"%c\" - "
 	                                "aborting."), *opt);
 	      usage(1);
-	      break;
 	}
       }
     }
@@ -1731,6 +1729,11 @@ select_timeout(int fds)			/* I - Number of descriptors returned */
  /*
   * Check for any job activity...
   */
+  if (JobHistoryUpdate && timeout > JobHistoryUpdate)
+  {
+    timeout = JobHistoryUpdate;
+    why     = "update job history";
+  }
 
   for (job = (cupsd_job_t *)cupsArrayFirst(ActiveJobs);
        job;
@@ -1859,7 +1862,7 @@ service_add_listener(int fd,		/* I - Socket file descriptor */
   cupsd_listener_t	*lis;		/* Listeners array */
   http_addr_t		addr;		/* Address variable */
   socklen_t		addrlen;	/* Length of address */
-  char			s[256];		/* String addresss */
+  char			s[256];		/* String address */
 
 
   addrlen = sizeof(addr);
@@ -1898,7 +1901,6 @@ service_add_listener(int fd,		/* I - Socket file descriptor */
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_add_listener: Unable to allocate listener: %s.", strerror(errno));
       exit(EXIT_FAILURE);
-      return;
     }
 
     cupsArrayAdd(Listeners, lis);
@@ -1950,7 +1952,6 @@ service_checkin(void)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_checkin: Unable to get listener sockets: %s", strerror(error));
       exit(EXIT_FAILURE);
-      return; /* anti-compiler-warning */
     }
 
    /*
@@ -1983,7 +1984,6 @@ service_checkin(void)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_checkin: Unable to get listener sockets: %s", strerror(-count));
       exit(EXIT_FAILURE);
-      return; /* anti-compiler-warning */
     }
 
    /*
@@ -2007,21 +2007,18 @@ service_checkin(void)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_checkin: We did not get started via Upstart.");
       exit(EXIT_FAILURE);
-      return;
     }
 
     if (strcasecmp(e, "socket"))
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_checkin: We did not get triggered via an Upstart socket event.");
       exit(EXIT_FAILURE);
-      return;
     }
 
     if ((e = getenv("UPSTART_FDS")) == NULL)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_checkin: Unable to get listener sockets from UPSTART_FDS.");
       exit(EXIT_FAILURE);
-      return;
     }
 
     cupsdLogMessage(CUPSD_LOG_DEBUG, "service_checkin: UPSTART_FDS=%s", e);
@@ -2031,7 +2028,6 @@ service_checkin(void)
     {
       cupsdLogMessage(CUPSD_LOG_ERROR, "service_checkin: Could not parse UPSTART_FDS: %s", strerror(errno));
       exit(EXIT_FAILURE);
-      return;
     }
 
    /*

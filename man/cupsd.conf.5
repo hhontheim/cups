@@ -1,14 +1,14 @@
 .\"
 .\" cupsd.conf man page for CUPS.
 .\"
-.\" Copyright © 2020-2021 by OpenPrinting.
+.\" Copyright © 2020-2022 by OpenPrinting.
 .\" Copyright © 2007-2019 by Apple Inc.
 .\" Copyright © 1997-2006 by Easy Software Products.
 .\"
 .\" Licensed under Apache License v2.0.  See the file "LICENSE" for more
 .\" information.
 .\"
-.TH cupsd.conf 5 "CUPS" "2021-03-11" "OpenPrinting"
+.TH cupsd.conf 5 "CUPS" "2021-10-01" "OpenPrinting"
 .SH NAME
 cupsd.conf \- server configuration file for cups
 .SH DESCRIPTION
@@ -236,13 +236,6 @@ Listens to the specified address and port or domain socket path for connections.
 Multiple Listen directives can be provided to listen on multiple addresses.
 The Listen directive is similar to the Port directive but allows you to restrict access to specific interfaces or networks.
 Note: "Listen *:\fIport\fR" and "Port \fIport\fR" effectively listen on all IP addresses, so you cannot combine them with Listen directives for explicit IPv4 or IPv6 addresses on the same port.
-.\"#ListenBackLog
-.TP 5
-\fBListenBackLog \fInumber\fR
-Specifies the number of pending connections that will be allowed.
-This normally only affects very busy servers that have reached the MaxClients limit, but can also be triggered by large numbers of simultaneous connections.
-When the limit is reached, the operating system will refuse additional connections until the scheduler can accept the pending ones.
-The default is the OS-defined default limit, typically either "5" for older operating systems or "128" for newer operating systems.
 .\"#Location
 .TP 5
 \fB<Location \fI/path\fB> \fR... \fB</Location>\fR
@@ -332,6 +325,27 @@ The default is "10800" (3 hours).
 Specifies the maximum size of the log files before they are rotated.
 The value "0" disables log rotation.
 The default is "1048576" (1MB).
+.\"#MaxSubscriptions
+.TP 5
+\fBMaxSubscriptions \fInumber\fR
+Specifies the maximum number of simultaneous event subscriptions that are allowed.
+Set to "0" to allow an unlimited number of subscriptions.
+The default is "100".
+.\"#MaxSubscriptionsPerJob
+.TP 5
+\fBMaxSubscriptionsPerJob \fInumber\fR
+Specifies the maximum number of simultaneous event subscriptions that are allowed per job.
+The default is "0" which allows up to MaxSubscriptions subscriptions per job.
+.\"#MaxSubscriptionsPerPrinter
+.TP 5
+\fBMaxSubscriptionsPerPrinter \fInumber\fR
+Specifies the maximum number of simultaneous event subscriptions that are allowed per printer.
+The default is "0" which allows up to MaxSubscriptions subscriptions per printer.
+.\"#MaxSubscriptionsPerUser
+.TP 5
+\fBMaxSubscriptionsPerUser \fInumber\fR
+Specifies the maximum number of simultaneous event subscriptions that are allowed per user.
+The default is "0" which allows up to MaxSubscriptions subscriptions per user.
 .\"#MultipleOperationTimeout
 .TP 5
 \fBMultipleOperationTimeout \fIseconds\fR
@@ -904,4 +918,4 @@ Require authentication for accesses from outside the 10. network:
 .BR subscriptions.conf (5),
 CUPS Online Help (http://localhost:631/help)
 .SH COPYRIGHT
-Copyright \[co] 2020-2021 by OpenPrinting.
+Copyright \[co] 2020-2022 by OpenPrinting.

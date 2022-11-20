@@ -1,7 +1,7 @@
 /*
  * PPD file routines for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2019 by Apple Inc.
  * Copyright © 1997-2007 by Easy Software Products, all rights reserved.
  *
@@ -3380,7 +3380,7 @@ ppd_read(cups_file_t    *fp,		/* I - File to read from */
     if (*lineptr == ':')
     {
      /*
-      * Get string after triming leading and trailing whitespace...
+      * Get string after trimming leading and trailing whitespace...
       */
 
       lineptr ++;
@@ -3430,12 +3430,12 @@ ppd_update_filters(ppd_file_t     *ppd,	/* I - PPD file */
 		srctype[256],
 		dstsuper[16],		/* Destination MIME media type */
 		dsttype[256],
-		program[1024],		/* Command to run */
 		*ptr,			/* Pointer into command to run */
 		buffer[1024],		/* Re-written cupsFilter value */
 		**filter;		/* Current filter */
   int		cost;			/* Cost of filter */
 
+  char		program[1024] = { 0 };	/* Command to run */
 
   DEBUG_printf(("4ppd_update_filters(ppd=%p, cg=%p)", ppd, pg));
 

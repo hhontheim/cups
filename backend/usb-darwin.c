@@ -955,7 +955,7 @@ static void *read_thread(void *reference)
       fputs("DEBUG: Got USB return aborted during read\n", stderr);
 
    /*
-    * Make sure this loop executes no more than once every 250 miliseconds...
+    * Make sure this loop executes no more than once every 250 milliseconds...
     */
 
     if ((readstatus != kIOReturnSuccess || rbytes == 0) && (g.wait_eof || !g.read_thread_stop))
@@ -978,7 +978,7 @@ static void *read_thread(void *reference)
          if (readstatus == kIOReturnSuccess && rbytes > 0 && readbuffer[rbytes-1] == 0x4)
            break;
 
-         /* Make sure this loop executes no more than once every 250 miliseconds... */
+         /* Make sure this loop executes no more than once every 250 milliseconds... */
          mach_wait_until(start + delay);
        }
      }
@@ -1128,7 +1128,7 @@ static void iterate_printers(iterator_callback_t callBack, void *userdata)
 
   iterator_reference_t reference = { callBack, userdata, true };
 
-  IONotificationPortRef addNotification = IONotificationPortCreate(kIOMasterPortDefault);
+  IONotificationPortRef addNotification = IONotificationPortCreate(kIOMainPortDefault);
 
   int printingClass = kUSBPrintingClass;
   int printingSubclass = kUSBPrintingSubclass;
@@ -1599,7 +1599,7 @@ static CFStringRef copy_printer_interface_deviceid(printer_interface_t printer, 
 		/* This request takes the 0 based configuration index. IOKit returns a 1 based configuration index */
 		configurationIndex -= 1;
 
-		bzero(&request, sizeof(request));
+		memset(&request, 0, sizeof(request));
 
 		request.bmRequestType		= USBmakebmRequestType(kUSBIn, kUSBClass, kUSBInterface);
 		request.bRequest			= kUSBPrintClassGetDeviceID;
@@ -1616,14 +1616,14 @@ static CFStringRef copy_printer_interface_deviceid(printer_interface_t printer, 
 
 			if (actualLength > 2 && actualLength <= bufferLength - 2)
 			{
-				ret = CFStringCreateWithBytes(NULL, (const UInt8 *) &request.pData[2], actualLength - 2, kCFStringEncodingUTF8, false);
+				ret = CFStringCreateWithBytes(NULL, (const UInt8 *)request.pData + 2, actualLength - 2, kCFStringEncodingUTF8, false);
 			}
 			else if (actualLength > 2) {
 				err = sendRequest(actualLength);
 				if (err == kIOReturnSuccess && request.wLenDone > 0)
 				{
 					actualLength = OSSwapBigToHostInt16(*((UInt16 *)request.pData));
-					ret = CFStringCreateWithBytes(NULL, (const UInt8 *) &request.pData[2], actualLength - 2, kCFStringEncodingUTF8, false);
+					ret = CFStringCreateWithBytes(NULL, (const UInt8 *)request.pData + 2, actualLength - 2, kCFStringEncodingUTF8, false);
 				}
 			}
 		}
@@ -1641,7 +1641,7 @@ static CFStringRef copy_printer_interface_deviceid(printer_interface_t printer, 
 		IOUSBDevRequestTO		request;
 		IOUSBDeviceDescriptor	desc;
 
-		bzero(&request, sizeof(request));
+		memset(&request, 0, sizeof(request));
 
 		request.bmRequestType = USBmakebmRequestType( kUSBIn,  kUSBStandard, kUSBDevice );
 		request.bRequest = kUSBRqGetDescriptor;
@@ -1670,41 +1670,59 @@ static CFStringRef copy_printer_interface_deviceid(printer_interface_t printer, 
 					CFStringAppendFormat(extras, NULL, CFSTR("MDL:%@;"), model);
 			}
 
-			if (serial == NULL && desc.iSerialNumber != 0)
+			if (desc.iSerialNumber != 0)
 			{
-				serial = copy_printer_interface_indexed_description(printer, desc.iSerialNumber, kUSBLanguageEnglish);
-				if (serial && CFStringGetLength(serial) > 0)
-					CFStringAppendFormat(extras, NULL, CFSTR("SERN:%@;"), serial);
+				// Always look at the USB serial number since some printers
+				// incorrectly include a bogus static serial number in their
+				// IEEE-1284 device ID string...
+				CFStringRef userial = copy_printer_interface_indexed_description(printer, desc.iSerialNumber, kUSBLanguageEnglish);
+				if (userial && CFStringGetLength(userial) > 0 && (serial == NULL || CFStringCompare(serial, userial, kCFCompareCaseInsensitive) != kCFCompareEqualTo))
+				{
+					if (serial != NULL)
+					{
+						// 1284 serial number doesn't match USB serial number, so  replace the existing SERN: in device ID
+						CFRange range = CFStringFind(ret, serial, 0);
+						CFMutableStringRef deviceIDString = CFStringCreateMutableCopy(NULL, 0, ret);
+						CFStringReplace(deviceIDString, range, userial);
+						CFRelease(ret);
+						ret = deviceIDString;
+
+						CFRelease(serial);
+					}
+					else
+					{
+						// No 1284 serial number so add SERN: with USB serial number to device ID
+						CFStringAppendFormat(extras, NULL, CFSTR("SERN:%@;"), userial);
+					}
+					serial = userial;
+				}
+				else if (userial != NULL)
+					CFRelease(userial);
 			}
 
 			if (ret != NULL)
 			{
 				CFStringAppend(extras, ret);
 				CFRelease(ret);
-
-				ret = extras;
 			}
-			else
-			{
-				ret = extras;
-			}
+      ret = extras;
 		}
 	}
 
 	if (ret != NULL)
 	{
-	/* Remove special characters from the serial number */
-	CFRange range = (serial != NULL ? CFStringFind(serial, CFSTR("+"), 0) : CFRangeMake(0, 0));
-	if (range.length == 1)
-	{
-		range = CFStringFind(ret, serial, 0);
+		/* Remove special characters from the serial number */
+		CFRange range = (serial != NULL ? CFStringFind(serial, CFSTR("+"), 0) : CFRangeMake(0, 0));
+		if (range.length == 1)
+		{
+			range = CFStringFind(ret, serial, 0);
 
-		CFMutableStringRef deviceIDString = CFStringCreateMutableCopy(NULL, 0, ret);
-		CFRelease(ret);
+			CFMutableStringRef deviceIDString = CFStringCreateMutableCopy(NULL, 0, ret);
+			CFRelease(ret);
 
-		ret = deviceIDString;
-		CFStringFindAndReplace(deviceIDString, CFSTR("+"), CFSTR(""), range, 0);
-	}
+			ret = deviceIDString;
+			CFStringFindAndReplace(deviceIDString, CFSTR("+"), CFSTR(""), range, 0);
+		}
 	}
 
 	if (manufacturer != NULL)
@@ -1731,7 +1749,7 @@ static CFStringRef copy_printer_interface_indexed_description(printer_interface_
 	UInt8 description[256]; // Max possible descriptor length
 	IOUSBDevRequestTO	request;
 
-	bzero(description, 2);
+	memset(description, 0, 2);
 
 	request.bmRequestType = USBmakebmRequestType(kUSBIn, kUSBStandard, kUSBDevice);
 	request.bRequest = kUSBRqGetDescriptor;
@@ -1745,7 +1763,7 @@ static CFStringRef copy_printer_interface_indexed_description(printer_interface_
 	err = (*printer)->ControlRequestTO(printer, 0, &request);
 	if (err != kIOReturnSuccess && err != kIOReturnOverrun)
 	{
-		bzero(description, request.wLength);
+		memset(description, 0, request.wLength);
 
 		// Let's try again full length. Here's why:
 		//      On USB 2.0 controllers, we will not get an overrun error.  We just get a "babble" error
@@ -1778,7 +1796,7 @@ static CFStringRef copy_printer_interface_indexed_description(printer_interface_
 	request.wValue = (kUSBStringDesc << 8) | index;
 	request.wIndex = language;
 
-	bzero(description, length);
+	memset(description, 0, length);
 	request.wLength = (UInt16)length;
 	request.pData = &description;
 	request.completionTimeout = 0;
@@ -1794,7 +1812,7 @@ static CFStringRef copy_printer_interface_indexed_description(printer_interface_
 	if ((description[0] & 1) != 0)
 		description[0] &= 0xfe;
 
-	char buffer[258] = {};
+	char buffer[258] = {0};
 	unsigned int maxLength = sizeof buffer;
 	if (description[0] > 1)
 	{
@@ -2329,7 +2347,7 @@ static void parse_pserror(char *sockBuffer,
 
       if ((logstrlen = snprintf(logstr, sizeof(logstr), "%s: %s\n", logLevel, pCommentBegin)) >= sizeof(logstr))
       {
-	/* If the string was trucnated make sure it has a linefeed before the nul */
+	/* If the string was truncated make sure it has a linefeed before the nul */
 	logstrlen = sizeof(logstr) - 1;
 	logstr[logstrlen - 1] = '\n';
       }

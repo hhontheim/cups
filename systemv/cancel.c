@@ -1,7 +1,7 @@
 /*
  * "cancel" command for CUPS.
  *
- * Copyright © 2021 by OpenPrinting.
+ * Copyright © 2021-2022 by OpenPrinting.
  * Copyright © 2007-2018 by Apple Inc.
  * Copyright © 1997-2006 by Easy Software Products.
  *
@@ -312,8 +312,7 @@ main(int  argc,				/* I - Number of command-line arguments */
 	        	op == IPP_PURGE_JOBS ? "purge-jobs" : "cancel-job",
         		cupsLastErrorString());
 
-	if (response)
-	  ippDelete(response);
+          ippDelete(response);
 
 	return (1);
       }
@@ -376,8 +375,7 @@ main(int  argc,				/* I - Number of command-line arguments */
 		      op == IPP_PURGE_JOBS ? "purge-jobs" : "cancel-job",
         	      cupsLastErrorString());
 
-      if (response)
-	ippDelete(response);
+      ippDelete(response);
 
       return (1);
     }
